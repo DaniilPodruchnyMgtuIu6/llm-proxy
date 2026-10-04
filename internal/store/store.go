@@ -4,12 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type Store struct {
@@ -54,17 +52,29 @@ type Summary struct {
 	ByModel        []DayStat `json:"by_model"`
 }
 
-func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir data: %w", err)
+// Open connects to PostgreSQL using a libpq/pgx DSN.
+// Example: postgres://llmproxy:llmproxy@localhost:5432/llmproxy?sslmode=disable
+func Open(databaseURL string) (*Store, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, fmt.Errorf("postgres DSN is empty (check DB_HOST/DB_PORT/DB_USER/DB_NAME)")
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(time.Hour)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+
 	s := &Store{db: db}
-	if err := s.migrate(); err != nil {
+	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -78,19 +88,19 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+func (s *Store) migrate(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS usage_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT NOT NULL,
+  id BIGSERIAL PRIMARY KEY,
+  ts TIMESTAMPTZ NOT NULL,
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
   pool_id TEXT NOT NULL DEFAULT '',
   status_code INTEGER NOT NULL,
-  latency_ms INTEGER NOT NULL DEFAULT 0,
-  prompt_tokens INTEGER NOT NULL DEFAULT 0,
-  completion_tokens INTEGER NOT NULL DEFAULT 0,
-  total_tokens INTEGER NOT NULL DEFAULT 0,
+  latency_ms BIGINT NOT NULL DEFAULT 0,
+  prompt_tokens BIGINT NOT NULL DEFAULT 0,
+  completion_tokens BIGINT NOT NULL DEFAULT 0,
+  total_tokens BIGINT NOT NULL DEFAULT 0,
   error_type TEXT NOT NULL DEFAULT '',
   request_id TEXT NOT NULL DEFAULT ''
 );
@@ -98,24 +108,24 @@ CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_events_provider ON usage_events(provider, ts);
 
 CREATE TABLE IF NOT EXISTS daily_counters (
-  day TEXT NOT NULL,
+  day DATE NOT NULL,
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
   pool_id TEXT NOT NULL DEFAULT '',
-  success_count INTEGER NOT NULL DEFAULT 0,
-  error_count INTEGER NOT NULL DEFAULT 0,
-  rate_limit_count INTEGER NOT NULL DEFAULT 0,
-  tokens_in INTEGER NOT NULL DEFAULT 0,
-  tokens_out INTEGER NOT NULL DEFAULT 0,
+  success_count BIGINT NOT NULL DEFAULT 0,
+  error_count BIGINT NOT NULL DEFAULT 0,
+  rate_limit_count BIGINT NOT NULL DEFAULT 0,
+  tokens_in BIGINT NOT NULL DEFAULT 0,
+  tokens_out BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY (day, provider, model, pool_id)
 );
 
 CREATE TABLE IF NOT EXISTS provider_health (
   provider TEXT PRIMARY KEY,
-  last_success_at TEXT,
-  last_error_at TEXT,
+  last_success_at TIMESTAMPTZ,
+  last_error_at TIMESTAMPTZ,
   last_error TEXT,
-  consecutive_errors INTEGER NOT NULL DEFAULT 0
+  consecutive_errors BIGINT NOT NULL DEFAULT 0
 );
 `)
 	return err
@@ -154,8 +164,8 @@ func (s *Store) RecordUsage(ctx context.Context, ev UsageEvent) error {
 INSERT INTO usage_events(
   ts, provider, model, pool_id, status_code, latency_ms,
   prompt_tokens, completion_tokens, total_tokens, error_type, request_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ev.TS.UTC().Format(time.RFC3339Nano),
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		ev.TS.UTC(),
 		ev.Provider, ev.Model, nullPool(ev.PoolID), ev.StatusCode, ev.LatencyMS,
 		ev.PromptTokens, ev.CompletionTokens, ev.TotalTokens, ev.ErrorType, ev.RequestID,
 	)
@@ -175,13 +185,13 @@ INSERT INTO usage_events(
 
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO daily_counters(day, provider, model, pool_id, success_count, error_count, rate_limit_count, tokens_in, tokens_out)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES ($1::date, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT(day, provider, model, pool_id) DO UPDATE SET
-  success_count = success_count + excluded.success_count,
-  error_count = error_count + excluded.error_count,
-  rate_limit_count = rate_limit_count + excluded.rate_limit_count,
-  tokens_in = tokens_in + excluded.tokens_in,
-  tokens_out = tokens_out + excluded.tokens_out
+  success_count = daily_counters.success_count + EXCLUDED.success_count,
+  error_count = daily_counters.error_count + EXCLUDED.error_count,
+  rate_limit_count = daily_counters.rate_limit_count + EXCLUDED.rate_limit_count,
+  tokens_in = daily_counters.tokens_in + EXCLUDED.tokens_in,
+  tokens_out = daily_counters.tokens_out + EXCLUDED.tokens_out
 `, day, ev.Provider, ev.Model, nullPool(ev.PoolID), success, errors, rateLimits, ev.PromptTokens, ev.CompletionTokens)
 	if err != nil {
 		return err
@@ -190,20 +200,20 @@ ON CONFLICT(day, provider, model, pool_id) DO UPDATE SET
 	if success == 1 {
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO provider_health(provider, last_success_at, consecutive_errors)
-VALUES (?, ?, 0)
+VALUES ($1, $2, 0)
 ON CONFLICT(provider) DO UPDATE SET
-  last_success_at = excluded.last_success_at,
+  last_success_at = EXCLUDED.last_success_at,
   consecutive_errors = 0
-`, ev.Provider, ev.TS.UTC().Format(time.RFC3339Nano))
+`, ev.Provider, ev.TS.UTC())
 	} else {
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO provider_health(provider, last_error_at, last_error, consecutive_errors)
-VALUES (?, ?, ?, 1)
+VALUES ($1, $2, $3, 1)
 ON CONFLICT(provider) DO UPDATE SET
-  last_error_at = excluded.last_error_at,
-  last_error = excluded.last_error,
-  consecutive_errors = consecutive_errors + 1
-`, ev.Provider, ev.TS.UTC().Format(time.RFC3339Nano), truncate(ev.ErrorType, 200))
+  last_error_at = EXCLUDED.last_error_at,
+  last_error = EXCLUDED.last_error,
+  consecutive_errors = provider_health.consecutive_errors + 1
+`, ev.Provider, ev.TS.UTC(), truncate(ev.ErrorType, 200))
 	}
 	if err != nil {
 		return err
@@ -219,7 +229,7 @@ func (s *Store) SuccessCount(ctx context.Context, day, provider, model, poolID s
 	var n int64
 	err := s.db.QueryRowContext(ctx, `
 SELECT COALESCE(SUM(success_count), 0) FROM daily_counters
-WHERE day = ? AND provider = ? AND model = ? AND pool_id = ?
+WHERE day = $1::date AND provider = $2 AND model = $3 AND pool_id = $4
 `, day, provider, model, nullPool(poolID)).Scan(&n)
 	return n, err
 }
@@ -231,7 +241,7 @@ func (s *Store) PoolSuccessCount(ctx context.Context, day, poolID string) (int64
 	var n int64
 	err := s.db.QueryRowContext(ctx, `
 SELECT COALESCE(SUM(success_count), 0) FROM daily_counters
-WHERE day = ? AND pool_id = ?
+WHERE day = $1::date AND pool_id = $2
 `, day, poolID).Scan(&n)
 	return n, err
 }
@@ -242,10 +252,10 @@ func (s *Store) Summary(ctx context.Context, fromDay, toDay, provider string) (S
 		return out, nil
 	}
 
-	where := `day >= ? AND day <= ?`
+	where := `day >= $1::date AND day <= $2::date`
 	args := []any{fromDay, toDay}
 	if provider != "" {
-		where += ` AND provider = ?`
+		where += ` AND provider = $3`
 		args = append(args, provider)
 	}
 

@@ -19,12 +19,12 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	st, err := store.Open(cfg.DatabasePath)
+	st, err := store.Open(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
 	defer st.Close()
-	log.Printf("database: %s", cfg.DatabasePath)
+	log.Printf("database: postgres")
 
 	var providers []provider.Provider
 	if cfg.GeminiAPIKey != "" {
