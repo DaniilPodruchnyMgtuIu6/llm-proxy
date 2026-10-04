@@ -1,0 +1,487 @@
+openapi: 3.0.3
+info:
+  title: LLM Proxy API
+  version: 0.2.0
+  description: |
+    HTTP-прокси над бесплатными LLM-источниками (Gemini, Groq, OpenRouter).
+
+    ## Для основной системы
+    1. `GET /v1/providers` — здоровье источников и квоты пулов  
+    2. `GET /v1/models` — модели с `source` + `quota` (фильтры ниже)  
+    3. Выбрать кандидата по `remaining_rpd` / `recommended`  
+    4. `POST /v1/chat/completions`  
+    5. `GET /v1/stats/summary` — операционная статистика из SQLite  
+
+    ## Квоты
+    - `quota.source=live` — live remaining (OpenRouter)  
+    - `quota.source=local_db` — остаток из локальной БД (успешные запросы за день)  
+    - `quota.source=static_catalog` — только потолок из каталога  
+    - `scope=shared_pool` + `pool_id` — общий дневной бюджет на группу моделей  
+
+    Интерактивная документация: [/docs](/docs)
+  contact:
+    name: llm-proxy
+servers:
+  - url: http://localhost:8080
+    description: Local
+tags:
+  - name: system
+  - name: catalog
+  - name: inference
+  - name: stats
+  - name: docs
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      summary: Healthcheck
+      operationId: healthz
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /docs:
+    get:
+      tags: [docs]
+      summary: Swagger UI
+      operationId: docsUI
+      responses:
+        "200":
+          description: HTML Swagger UI
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /openapi.yaml:
+    get:
+      tags: [docs]
+      summary: OpenAPI specification
+      operationId: openAPISpec
+      responses:
+        "200":
+          description: OpenAPI 3 YAML
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /v1/providers:
+    get:
+      tags: [catalog]
+      summary: Список провайдеров (источников)
+      description: |
+        Обзор подключённых backend-ов: health, число моделей, квота пула (если есть).
+      operationId: listProviders
+      responses:
+        "200":
+          description: Providers list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProvidersResponse"
+        "502":
+          $ref: "#/components/responses/ProxyError"
+
+  /v1/models:
+    get:
+      tags: [catalog]
+      summary: Список моделей с source и quota
+      description: |
+        OpenAI-совместимый список, расширенный полями для роутинга в основной системе.
+      operationId: listModels
+      parameters:
+        - name: provider
+          in: query
+          schema:
+            type: string
+            enum: [gemini, groq, openrouter]
+          description: Фильтр по источнику
+        - name: free
+          in: query
+          schema:
+            type: boolean
+          description: Только free-модели
+        - name: recommended
+          in: query
+          schema:
+            type: boolean
+          description: Только рекомендованные для free-роутинга
+      responses:
+        "200":
+          description: Models list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelsResponse"
+        "502":
+          $ref: "#/components/responses/ProxyError"
+
+  /v1/chat/completions:
+    post:
+      tags: [inference]
+      summary: Chat completions (OpenAI-compatible)
+      description: |
+        Проксирует запрос в backend, выбранный по `model` id.
+        Успешные и ошибочные вызовы пишутся в SQLite (`usage_events`, `daily_counters`).
+      operationId: chatCompletions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+            examples:
+              gemini:
+                value:
+                  model: gemini-3.5-flash-lite
+                  messages:
+                    - role: user
+                      content: ping
+              groq:
+                value:
+                  model: openai/gpt-oss-20b
+                  messages:
+                    - role: user
+                      content: ping
+              openrouter:
+                value:
+                  model: openrouter/free
+                  messages:
+                    - role: user
+                      content: ping
+      responses:
+        "200":
+          description: Upstream chat completion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+        "400":
+          $ref: "#/components/responses/ProxyError"
+        "404":
+          $ref: "#/components/responses/ProxyError"
+        "429":
+          description: Rate limit (upstream or free tier)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamError"
+        "502":
+          $ref: "#/components/responses/ProxyError"
+
+  /v1/stats/summary:
+    get:
+      tags: [stats]
+      summary: Агрегированная статистика из SQLite
+      description: |
+        Для поддержки и дашбордов основной системы: успехи, ошибки, 429, токены.
+        По умолчанию окно — последние 7 UTC-дней.
+      operationId: statsSummary
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+            example: "2026-09-28"
+          description: Начало периода (YYYY-MM-DD), default = today-7d UTC
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+            example: "2026-10-04"
+          description: Конец периода (YYYY-MM-DD), default = today UTC
+        - name: provider
+          in: query
+          schema:
+            type: string
+            enum: [gemini, groq, openrouter]
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsSummary"
+        "500":
+          $ref: "#/components/responses/ProxyError"
+
+components:
+  schemas:
+    Source:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          example: groq
+        name:
+          type: string
+          example: Groq (GroqCloud)
+
+    Quota:
+      type: object
+      description: Бюджет запросов/токенов для роутинга
+      properties:
+        rpm:
+          type: integer
+          nullable: true
+        rpd:
+          type: integer
+          nullable: true
+        tpm:
+          type: integer
+          nullable: true
+        tpd:
+          type: integer
+          nullable: true
+        remaining_rpm:
+          type: integer
+          nullable: true
+        remaining_rpd:
+          type: integer
+          nullable: true
+          description: Остаток дневных запросов (live или local_db)
+        used_rpd:
+          type: integer
+          nullable: true
+        reset_rpd_hint:
+          type: string
+          enum: [midnight_utc, midnight_pacific, sliding_window, unknown]
+        resets_at:
+          type: string
+          format: date-time
+          description: Следующий сброс RPD (если вычисляем)
+        scope:
+          type: string
+          enum: [per_model, shared_pool]
+        pool_id:
+          type: string
+          example: openrouter:free
+        source:
+          type: string
+          enum: [live, local_db, static_catalog, unknown]
+        confidence:
+          type: string
+          enum: [exact, estimate, unknown]
+        tier:
+          type: string
+          example: free
+        notes:
+          type: string
+
+    Model:
+      type: object
+      required: [id, object, owned_by, provider, source, free, quota]
+      properties:
+        id:
+          type: string
+          example: openai/gpt-oss-20b
+        object:
+          type: string
+          example: model
+        created:
+          type: integer
+          format: int64
+        owned_by:
+          type: string
+        provider:
+          type: string
+          description: Дублирует source.id для удобства фильтров
+          example: groq
+        source:
+          $ref: "#/components/schemas/Source"
+        free:
+          type: boolean
+        recommended:
+          type: boolean
+          description: Рекомендована для free-роутинга
+        quota:
+          $ref: "#/components/schemas/Quota"
+
+    ModelsResponse:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          example: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Model"
+
+    ProviderStatus:
+      type: object
+      required: [id, name, enabled, healthy, models, free_models]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        enabled:
+          type: boolean
+        healthy:
+          type: boolean
+        error:
+          type: string
+        models:
+          type: integer
+        free_models:
+          type: integer
+        docs:
+          type: string
+          format: uri
+        quota:
+          $ref: "#/components/schemas/Quota"
+
+    ProvidersResponse:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          example: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderStatus"
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        content:
+          type: string
+
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          description: ID из GET /v1/models
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        temperature:
+          type: number
+        max_tokens:
+          type: integer
+        stream:
+          type: boolean
+          description: Streaming пока не гарантируется прокси
+
+    ChatCompletionResponse:
+      type: object
+      description: Upstream OpenAI-compatible payload (pass-through)
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+
+    DayStat:
+      type: object
+      properties:
+        day:
+          type: string
+        provider:
+          type: string
+        model:
+          type: string
+        pool_id:
+          type: string
+        success_count:
+          type: integer
+        error_count:
+          type: integer
+        rate_limit_count:
+          type: integer
+        tokens_in:
+          type: integer
+        tokens_out:
+          type: integer
+
+    StatsSummary:
+      type: object
+      properties:
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        total_success:
+          type: integer
+        total_errors:
+          type: integer
+        total_rate_limit:
+          type: integer
+        tokens_in:
+          type: integer
+        tokens_out:
+          type: integer
+        by_provider:
+          type: array
+          items:
+            $ref: "#/components/schemas/DayStat"
+        by_model:
+          type: array
+          items:
+            $ref: "#/components/schemas/DayStat"
+
+    ProxyErrorBody:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              example: proxy_error
+
+    UpstreamError:
+      type: object
+      description: Тело ошибки upstream (pass-through) или proxy_error
+      additionalProperties: true
+
+  responses:
+    ProxyError:
+      description: Proxy error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProxyErrorBody"
