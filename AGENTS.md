@@ -120,7 +120,7 @@ flowchart TD
 
 `/v1/models`: `rank=1` — лучшая; есть `quality_score`, `quota`.
 
-Инфра: `docker compose up -d` (Postgres + pgAdmin).
+Инфра: `docker compose up -d` (proxy + Postgres + pgAdmin). Раздача: `docs/DEPLOY.md`, скрипты `scripts/start.*`. Ключи только в `.env`, не в образ.
 
 ---
 

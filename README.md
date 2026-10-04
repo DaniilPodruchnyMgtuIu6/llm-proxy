@@ -2,11 +2,44 @@
 
 HTTP-прокси для работы с разными LLM через единый OpenAI-совместимый API. Цель — агрегировать **бесплатные** источники моделей (лимиты на день/неделю) и прозрачно маршрутизировать запросы.
 
+## Быстрый старт (Docker)
+
+Нужен Docker Desktop. Ключи API **свои** — кладутся только в локальный `.env`, в образ не вшиваются.
+
+**Windows:**
+
+```powershell
+copy .env.example .env
+# впиши GEMINI_API_KEY / GROQ_API_KEY / OPENROUTER_API_KEY
+.\scripts\start.ps1
+```
+
+**Linux / macOS:**
+
+```bash
+cp .env.example .env
+# впиши ключи
+chmod +x scripts/*.sh
+./scripts/start.sh
+```
+
+| Сервис | URL |
+|--------|-----|
+| Proxy | http://localhost:8080 |
+| Swagger | http://localhost:8080/docs |
+| Architecture | http://localhost:8080/architecture |
+| pgAdmin | http://localhost:5050 (`admin@example.com` / `admin`) |
+
+Остановка: `.\scripts\stop.ps1` / `./scripts/stop.sh`.
+
+Подробнее про раздачу друзьям и образ: [`docs/DEPLOY.md`](./docs/DEPLOY.md).
+
 ## Документация
 
 | Документ | Содержание |
 |----------|------------|
-| [`docs/architecture.md`](./docs/architecture.md) | Архитектура + Mermaid (смотреть через [/architecture](http://localhost:8080/architecture)) |
+| [`docs/DEPLOY.md`](./docs/DEPLOY.md) | Docker, `.env`, передача друзьям |
+| [`docs/architecture.md`](./docs/architecture.md) | Архитектура + Mermaid → [/architecture](http://localhost:8080/architecture) |
 | [`docs/api.md`](./docs/api.md) | Контракт для основной системы |
 | [`docs/providers/`](./docs/providers/) | Карточки Gemini / Groq / OpenRouter |
 | [/docs](http://localhost:8080/docs) | Swagger UI |
@@ -22,13 +55,16 @@ HTTP-прокси для работы с разными LLM через един�
 | `GET` | `/openapi.yaml` | OpenAPI 3 |
 | `GET` | `/healthz` | Healthcheck |
 | `GET` | `/v1/providers` | Источники + квоты |
-| `GET` | `/v1/models` | Модели: `source`, `quota`, `quality_score`, `rank` (лучшие первые) |
+| `GET` | `/v1/models` | Модели: `source`, `quota`, `quality_score`, `rank` |
 | `GET` | `/v1/stats/summary` | Статистика из PostgreSQL |
-| `POST` | `/v1/chat/completions` | Чат |
+| `POST` | `/v1/chat/completions` | Чат (`model` опционален) |
+| `POST` | `/v1/completion` | Алиас chat |
+| `POST` | `/v1/route` | Авто-выбор модели |
 
 ```bash
 curl "http://localhost:8080/v1/models?recommended=true"
-# data[0] — самая «мозговая» из выдачи (rank=1)
+curl -s http://localhost:8080/v1/completion -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"ping"}],"max_tokens":32}'
 ```
 
 ## Провайдеры
@@ -39,51 +75,21 @@ curl "http://localhost:8080/v1/models?recommended=true"
 | Groq | [groq.md](./docs/providers/groq.md) | `GROQ_API_KEY` |
 | OpenRouter | [openrouter.md](./docs/providers/openrouter.md) | `OPENROUTER_API_KEY` |
 
-## Инфраструктура
-
-```bash
-docker compose up -d
-```
-
-| Сервис | URL / порт |
-|--------|------------|
-| Postgres | `localhost:5432` (user/pass/db: `llmproxy`) |
-| pgAdmin | http://localhost:5050 (`admin@llm-proxy.local` / `admin`) |
-| Proxy | http://localhost:8080 |
-
-В pgAdmin: Add Server → Host `postgres` (из контейнера) или `host.docker.internal`/`localhost` с хоста, User/Password/DB `llmproxy`.
-
 ## Конфиг
 
-См. [`.env.example`](./.env.example).
+См. [`.env.example`](./.env.example). Секреты только в `.env` (gitignore).
 
-```env
-ADDR=:8080
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=llmproxy
-DB_PASSWORD=llmproxy
-DB_NAME=llmproxy
-DB_SSLMODE=disable
-GEMINI_API_KEY=...
-GROQ_API_KEY=...
-OPENROUTER_API_KEY=...
-```
+При `docker compose` приложение всегда ходит в БД на хост `postgres` (переопределение в compose), даже если в `.env` для локальной разработки указано `DB_HOST=localhost`.
 
-## Запуск
+## Локальная разработка без Docker-приложения
 
 ```bash
-docker compose up -d
-go run ./cmd/server
+docker compose up -d postgres pgadmin   # только инфра
+go run ./cmd/server                     # DB_HOST=localhost в .env
 ```
 
 ## Стек
 
-- Go · PostgreSQL (`pgx`) · Docker Compose · OpenAPI/Swagger
-
-## Статус
-
-- [x] Multi-provider proxy (Gemini, Groq, OpenRouter)
-- [x] Quotas + ranking + PostgreSQL stats
-- [x] Swagger + architecture docs (Mermaid)
-- [ ] Auto-fallback при 429
+- Go, OpenAI-compatible HTTP API
+- PostgreSQL 16 + pgAdmin
+- Docker Compose (proxy + db + pgAdmin)
