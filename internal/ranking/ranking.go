@@ -53,20 +53,21 @@ func scoreGemini(id string) int {
 		return base
 	}
 
-	// Text chat family: Pro > Flash > Flash-Lite
+	// Text chat family on free tier: prefer reliable Flash over low-RPM Pro aliases.
+	// Pro quality still ranks high, but *-pro-latest burns RPM=5 and often 429s first.
 	tier := 5000
 	switch {
 	case strings.Contains(id, "pro"):
-		tier = 9200
+		tier = 8600
 	case strings.Contains(id, "flash-lite"), strings.Contains(id, "flash_lite"):
-		tier = 6400
+		tier = 8200
 	case strings.Contains(id, "flash"):
-		tier = 7800
+		tier = 8800
 	}
 
-	// Prefer explicit versions over *-latest aliases slightly under same tier.
+	// Prefer explicit versions over *-latest aliases.
 	if strings.Contains(id, "latest") {
-		tier -= 80
+		tier -= 400
 	}
 	if strings.Contains(id, "preview") {
 		tier -= 40

@@ -47,6 +47,24 @@ func isPublicPath(path string) bool {
 	case "/healthz", "/openapi.yaml", "/architecture", "/architecture/", "/architecture.md":
 		return true
 	default:
-		return strings.HasPrefix(path, "/docs")
+		if strings.HasPrefix(path, "/docs") {
+			return true
+		}
+		// Admin UI endpoints (LAN-trusted); /v1 still protected by PROXY_API_KEY when set.
+		return strings.HasPrefix(path, "/admin/")
 	}
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Request-ID")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, X-LLM-Proxy-Model, X-LLM-Proxy-Provider, X-LLM-Proxy-Attempts")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

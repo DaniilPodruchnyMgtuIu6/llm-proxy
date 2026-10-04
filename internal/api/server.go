@@ -7,37 +7,60 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-proxy/llm-proxy/internal/config"
 	"github.com/llm-proxy/llm-proxy/internal/logging"
 	"github.com/llm-proxy/llm-proxy/internal/provider"
+	"github.com/llm-proxy/llm-proxy/internal/runtime"
 	"github.com/llm-proxy/llm-proxy/internal/store"
 )
 
 type Server struct {
 	registry    *provider.Registry
 	store       *store.Store
+	runtime     *runtime.Store
+	cfg         config.Config
 	mux         *http.ServeMux
 	openAPIPath string
 	apiKey      string
 }
 
+type ServerOptions struct {
+	Registry    *provider.Registry
+	Store       *store.Store
+	Runtime     *runtime.Store
+	Config      config.Config
+	OpenAPIPath string
+	APIKey      string
+}
+
 func NewServer(registry *provider.Registry, st *store.Store, openAPIPath string) *Server {
-	return NewServerWithAuth(registry, st, openAPIPath, "")
+	return NewServerWithOptions(ServerOptions{
+		Registry: registry, Store: st, OpenAPIPath: openAPIPath,
+	})
 }
 
 func NewServerWithAuth(registry *provider.Registry, st *store.Store, openAPIPath, apiKey string) *Server {
+	return NewServerWithOptions(ServerOptions{
+		Registry: registry, Store: st, OpenAPIPath: openAPIPath, APIKey: apiKey,
+	})
+}
+
+func NewServerWithOptions(opts ServerOptions) *Server {
 	s := &Server{
-		registry:    registry,
-		store:       st,
+		registry:    opts.Registry,
+		store:       opts.Store,
+		runtime:     opts.Runtime,
+		cfg:         opts.Config,
 		mux:         http.NewServeMux(),
-		openAPIPath: openAPIPath,
-		apiKey:      strings.TrimSpace(apiKey),
+		openAPIPath: opts.OpenAPIPath,
+		apiKey:      strings.TrimSpace(opts.APIKey),
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return withRequestContext(withAPIKey(s.apiKey, s.mux))
+	return withRequestContext(withCORS(withAPIKey(s.apiKey, s.mux)))
 }
 
 func (s *Server) routes() {
@@ -55,6 +78,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("POST /v1/completion", s.handleChatCompletions)
 	s.mux.HandleFunc("POST /v1/route", s.handleRoute)
+
+	s.mux.HandleFunc("GET /admin/status", s.handleAdminStatus)
+	s.mux.HandleFunc("PUT /admin/keys", s.handleAdminKeys)
+	s.mux.HandleFunc("PUT /admin/defaults", s.handleAdminDefaults)
+	s.mux.HandleFunc("POST /admin/apply", s.handleAdminApply)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -122,6 +150,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	if err := provider.ValidateChatBody(body); err != nil {
+		logging.Infof(r.Context(), "chat_validation_failed", "err", err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	s.serveChat(w, r, body, provider.RouteOptions{})
 }
@@ -156,6 +189,11 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 	body, err := json.Marshal(raw)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid route body")
+		return
+	}
+	if err := provider.ValidateChatBody(body); err != nil {
+		logging.Infof(r.Context(), "route_validation_failed", "err", err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	logging.Debugf(r.Context(), "route_options", "provider", opts.Provider, "recommended_only", opts.RecommendedOnly)

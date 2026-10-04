@@ -65,6 +65,37 @@ func TestSanitizeChatBodyOpenRouterKeepsTopK(t *testing.T) {
 	}
 }
 
+func TestSanitizeChatBodyGeminiDropsPenalties(t *testing.T) {
+	body := json.RawMessage(`{
+		"model":"gemini-3.5-flash-lite",
+		"messages":[{"role":"user","content":"hi"}],
+		"temperature":0.2,
+		"presence_penalty":0.5,
+		"frequency_penalty":0.1,
+		"top_k":40
+	}`)
+	got, err := SanitizeChatBody("gemini", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(got, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["temperature"] == nil {
+		t.Fatal("temperature should pass")
+	}
+	if _, ok := obj["presence_penalty"]; ok {
+		t.Fatal("presence_penalty must be stripped for gemini")
+	}
+	if _, ok := obj["frequency_penalty"]; ok {
+		t.Fatal("frequency_penalty must be stripped for gemini")
+	}
+	if _, ok := obj["top_k"]; ok {
+		t.Fatal("top_k must be stripped for gemini")
+	}
+}
+
 func TestChatCompletionsOmitsModelUsesAuto(t *testing.T) {
 	var sawModel string
 	p := &mockProvider{

@@ -162,7 +162,9 @@ ON CONFLICT(provider) DO UPDATE SET
   last_success_at = EXCLUDED.last_success_at,
   consecutive_errors = 0
 `, ev.Provider, ev.TS.UTC())
-	} else {
+	} else if affectsCircuit(ev) {
+		// Only hard upstream failures trip the circuit. 429 / 400 / 404 are
+		// model- or quota-local and must not disable the whole provider.
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO provider_health(provider, last_error_at, last_error, consecutive_errors)
 VALUES ($1, $2, $3, 1)
@@ -170,6 +172,14 @@ ON CONFLICT(provider) DO UPDATE SET
   last_error_at = EXCLUDED.last_error_at,
   last_error = EXCLUDED.last_error,
   consecutive_errors = provider_health.consecutive_errors + 1
+`, ev.Provider, ev.TS.UTC(), truncate(ev.ErrorType, 200))
+	} else {
+		_, err = tx.ExecContext(ctx, `
+INSERT INTO provider_health(provider, last_error_at, last_error, consecutive_errors)
+VALUES ($1, $2, $3, 0)
+ON CONFLICT(provider) DO UPDATE SET
+  last_error_at = EXCLUDED.last_error_at,
+  last_error = EXCLUDED.last_error
 `, ev.Provider, ev.TS.UTC(), truncate(ev.ErrorType, 200))
 	}
 	if err != nil {
@@ -315,4 +325,24 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// affectsCircuit reports whether a failed attempt should open/advance the
+// provider circuit breaker. Quota and client/model errors must not disable
+// an otherwise healthy provider.
+func affectsCircuit(ev UsageEvent) bool {
+	if ev.StatusCode == 429 || ev.ErrorType == "rate_limit" {
+		return false
+	}
+	if ev.StatusCode == 400 || ev.ErrorType == "bad_request" {
+		return false
+	}
+	if ev.StatusCode == 404 || ev.ErrorType == "not_found" {
+		return false
+	}
+	if ev.StatusCode == 402 || ev.ErrorType == "credits" {
+		return false
+	}
+	// Timeouts and 5xx / unknown upstream failures do.
+	return true
 }

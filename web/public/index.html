@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Proxy Gateway</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="rail">
+      <div class="brand">
+        <span class="brand-mark">LP</span>
+        <div>
+          <strong>LLM Proxy</strong>
+          <small>Gateway console</small>
+        </div>
+      </div>
+      <nav id="nav">
+        <button data-view="gateway" class="active">Настройки</button>
+        <button data-view="overview">Модели и статистика</button>
+        <button data-view="chat">Чат</button>
+        <button data-view="keys">Ключи</button>
+      </nav>
+      <div class="rail-foot">
+        <a href="/docs" target="_blank" rel="noreferrer">Документация API</a>
+        <span id="setup-pill" class="pill warn">настройка</span>
+      </div>
+    </aside>
+
+    <main>
+      <header class="top">
+        <div>
+          <h1 id="view-title">Настройки</h1>
+          <p id="view-sub">Модель по умолчанию и параметры — применяются без перезапуска Docker</p>
+        </div>
+        <button id="btn-apply" class="btn primary">Сохранить и применить</button>
+      </header>
+
+      <section id="view-setup" class="panel hidden">
+        <h2>Первый запуск</h2>
+        <p class="lead">Добавьте хотя бы один ключ провайдера. Сохранение сразу применит конфигурацию — повторный <code>docker compose up</code> не нужен.</p>
+        <div class="grid keys-grid" id="setup-keys"></div>
+        <button id="btn-setup-save" class="btn primary">Сохранить и применить</button>
+      </section>
+
+      <section id="view-gateway" class="panel">
+        <div class="grid two">
+          <article class="card">
+            <h3>Модель по умолчанию</h3>
+            <label class="field">
+              <span>Режим</span>
+              <select id="model-mode">
+                <option value="auto">auto — лучшая доступная + запасные</option>
+                <option value="fixed">конкретная модель</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Модель</span>
+              <select id="model-id" disabled></select>
+            </label>
+            <p class="muted">Параметры ниже уходят в запрос, если заполнены. Диапазоны: temperature 0–2, top_p 0–1, max_tokens ≥ 8, top_k 1–200, penalties −2…2. Неподдерживаемые поля прокси отрежет сам.</p>
+            <div class="grid two params">
+              <label class="field"><span>temperature</span><input id="p-temperature" type="number" min="0" max="2" step="0.1" placeholder="—" /></label>
+              <label class="field"><span>top_p</span><input id="p-top_p" type="number" min="0" max="1" step="0.05" placeholder="—" /></label>
+              <label class="field"><span>max_tokens</span><input id="p-max_tokens" type="number" min="8" max="128000" step="1" placeholder="256" /></label>
+              <label class="field"><span>top_k</span><input id="p-top_k" type="number" min="1" max="200" step="1" placeholder="—" /></label>
+              <label class="field"><span>presence_penalty</span><input id="p-presence_penalty" type="number" min="-2" max="2" step="0.1" placeholder="—" /></label>
+              <label class="field"><span>frequency_penalty</span><input id="p-frequency_penalty" type="number" min="-2" max="2" step="0.1" placeholder="—" /></label>
+            </div>
+          </article>
+          <article class="card">
+            <h3>Как вызывать API</h3>
+            <p class="muted">Базовый адрес (через этот UI):</p>
+            <pre id="api-base" class="code"></pre>
+            <p class="muted">Пример запроса (без model = auto):</p>
+            <pre id="api-example" class="code"></pre>
+            <label class="field">
+              <span>Ключ PROXY_API_KEY для UI (если включён на сервере)</span>
+              <input id="ui-proxy-key" type="password" placeholder="необязательно" />
+            </label>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-overview" class="panel hidden">
+        <div class="overview-head">
+          <div class="toolbar overview-toolbar">
+            <label class="field inline">
+              <span>Период с</span><input id="stats-from" type="date" />
+            </label>
+            <label class="field inline">
+              <span>по</span><input id="stats-to" type="date" />
+            </label>
+            <button id="btn-refresh-overview" class="btn">Обновить</button>
+          </div>
+          <ul class="legend">
+            <li>Остатки квот обновляются каждые 5 с</li>
+            <li><strong>Отказы по квоте</strong> — провайдер отклонил запрос из‑за исчерпанного лимита (HTTP 429)</li>
+          </ul>
+        </div>
+
+        <div id="stats-summary" class="kpi-row"></div>
+
+        <div class="section-block">
+          <div class="section-title">
+            <h3>Провайдеры</h3>
+            <p>Сколько запросов ещё доступно сегодня</p>
+          </div>
+          <div id="provider-cards" class="provider-grid"></div>
+        </div>
+
+        <div class="section-block">
+          <div class="section-title">
+            <h3>Модели и остатки</h3>
+            <p>Рейтинг качества и дневной остаток по каждой модели</p>
+          </div>
+          <p class="note-line">Gemini и Groq — лимит на модель. OpenRouter — общий пул на все free-модели.</p>
+          <div class="card table-card">
+            <table id="quota-table" class="data-table">
+              <thead>
+                <tr>
+                  <th class="col-rank">№</th>
+                  <th class="col-model">Модель</th>
+                  <th class="col-prov">Провайдер</th>
+                  <th class="col-num">Осталось</th>
+                  <th class="col-num">Использовано</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section-block">
+          <div class="section-title">
+            <h3>История запросов</h3>
+            <p>За выбранный период</p>
+          </div>
+          <div class="usage-stack">
+            <article class="card table-card">
+              <h4>По провайдерам</h4>
+              <table id="stats-by-provider" class="data-table data-table-compact">
+                <thead>
+                  <tr>
+                    <th class="col-prov-wide">Провайдер</th>
+                    <th class="col-num">Успешно</th>
+                    <th class="col-num">Ошибки</th>
+                    <th class="col-num">Отказы по квоте</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </article>
+            <article class="card table-card">
+              <h4>По моделям</h4>
+              <table id="stats-by-model" class="data-table">
+                <thead>
+                  <tr>
+                    <th class="col-model">Модель</th>
+                    <th class="col-prov">Провайдер</th>
+                    <th class="col-num">Успешно</th>
+                    <th class="col-num">Отказы по квоте</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-chat" class="panel hidden">
+        <div class="card chat">
+          <div id="chat-log" class="chat-log hidden"></div>
+          <form id="chat-form" class="chat-form">
+            <textarea id="chat-input" rows="3" placeholder="Напишите сообщение…"></textarea>
+            <button class="btn primary" type="submit">Отправить</button>
+          </form>
+          <p id="chat-meta" class="muted hidden"></p>
+        </div>
+      </section>
+
+      <section id="view-keys" class="panel hidden">
+        <p class="lead">Ключи хранятся в runtime-хранилище прокси и применяются без пересоздания контейнеров.</p>
+        <div class="grid keys-grid" id="keys-form"></div>
+        <button id="btn-keys-save" class="btn primary">Сохранить ключи и применить</button>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

@@ -126,7 +126,11 @@ Pricing: у многих актуальных Flash/Flash-Lite/Pro строк In
 |----------|----------|
 | `gemini-2.5-flash-lite` | 404 для новых пользователей (переезд на 3.5) |
 
-### Полный список, который отдал API на 2026-10-04 (61 шт.)
+### Фильтр в прокси
+
+В `/v1/models` и роутинг попадают **только chat-capable** id (`IsChatCapable`): без embedding / image / TTS / veo / lyria / customtools / research-agents.
+
+### Полный список, который отдал API на 2026-10-04 (61 шт.; в прокси — урезанный chat-набор)
 
 Текст / chat-ориентированные и алиасы:
 
@@ -173,9 +177,16 @@ curl http://localhost:8080/v1/chat/completions \
 
 Прямой вызов Gemini (минуя прокси) — тот же OpenAI-формат на их base URL.
 
+## Параметры chat (OpenAI-compat)
+
+Gemini **не принимает** `presence_penalty`, `frequency_penalty`, `top_k` (ошибка `Unknown name … Cannot find field`).  
+Прокси отрезает их в `SanitizeChatBody` перед upstream; для Groq/OpenRouter они могут уйти как есть.
+
 ## Заметки / pitfalls
 
 - Список `/models` ≠ гарантия, что model id ещё работает для chat на твоём аккаунте (см. 2.5 → 3.5).
+- При 429 прокси делает fallback на другую модель/провайдера (заголовки `X-LLM-Proxy-*`).
+- После серии ошибок провайдер может временно уйти в circuit-open; явный `model` всё равно пробуется один раз.
 - Preview/experimental модели часто с урезанными лимитами.
 - Image/video/TTS могут не быть на free или иметь отдельные квоты (IPM и т.п.) — перед использованием сверяй pricing + AI Studio.
 - Interactions API в доках AI Studio позиционируется как новый default; наш прокси пока на OpenAI-compat — этого достаточно для chat.

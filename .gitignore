@@ -3,6 +3,7 @@
 bin/
 dist/
 data/
+.runtime/
 llm-proxy-image.tar
 *.tar
 *.db

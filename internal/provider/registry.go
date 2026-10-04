@@ -47,6 +47,9 @@ type Registry struct {
 	cacheAt    time.Time
 	cacheAll   []Model
 	cacheIndex map[string]Provider
+
+	denyMu    sync.Mutex
+	denyUntil map[string]time.Time // model id temporarily unfit for auto-route
 }
 
 // RouteOptions controls auto-routing / fallback candidate selection.
@@ -95,7 +98,28 @@ func NewRegistryWithOptions(st *store.Store, opts Options, providers ...Provider
 		store:      st,
 		opts:       opts,
 		cacheIndex: make(map[string]Provider),
+		denyUntil:  make(map[string]time.Time),
 	}
+}
+
+// ReplaceProviders hot-swaps upstream clients and drops the models cache.
+func (r *Registry) ReplaceProviders(providers ...Provider) {
+	r.cacheMu.Lock()
+	r.cacheAll = nil
+	r.cacheIndex = make(map[string]Provider)
+	r.cacheAt = time.Time{}
+	r.cacheMu.Unlock()
+
+	r.mu.Lock()
+	r.providers = providers
+	r.byModel = make(map[string]Provider)
+	r.mu.Unlock()
+}
+
+func (r *Registry) ProviderCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.providers)
 }
 
 func (r *Registry) ListModels(ctx context.Context, filter ListFilter) (ModelsResponse, error) {
@@ -162,6 +186,9 @@ func (r *Registry) fetchAllModels(ctx context.Context) ([]Model, map[string]Prov
 			continue
 		}
 		for _, m := range models {
+			if !IsChatCapable(p.Name(), m.ID) {
+				continue
+			}
 			index[m.ID] = p
 			m.QualityScore = ranking.Score(m.Provider, m.ID)
 			r.applyLocalQuota(ctx, &m)
@@ -287,9 +314,57 @@ func (r *Registry) ListProviders(ctx context.Context) (ProvidersResponse, error)
 				}
 			}
 		}
+		r.enrichProviderQuotaFromModels(ctx, &st)
 		out.Data = append(out.Data, st)
 	}
 	return out, nil
+}
+
+// enrichProviderQuotaFromModels fills remaining_rpd for per-model providers
+// (Gemini/Groq) by summing chat-model leftovers — OpenRouter already has a live pool.
+func (r *Registry) enrichProviderQuotaFromModels(ctx context.Context, st *Status) {
+	if st == nil {
+		return
+	}
+	if st.Quota != nil && st.Quota.RemainingRPD != nil && st.Quota.Scope == "shared_pool" {
+		return
+	}
+	if st.Quota != nil && st.Quota.Source == "live" && st.Quota.RemainingRPD != nil {
+		return
+	}
+	listed, err := r.ListModels(ctx, ListFilter{Provider: st.ID})
+	if err != nil && len(listed.Data) == 0 {
+		return
+	}
+	var sumRem, sumUsed, sumCap int64
+	n := 0
+	for _, m := range listed.Data {
+		if m.Quota == nil || m.Quota.RemainingRPD == nil {
+			continue
+		}
+		sumRem += *m.Quota.RemainingRPD
+		if m.Quota.UsedRPD != nil {
+			sumUsed += *m.Quota.UsedRPD
+		}
+		if m.Quota.RPD != nil {
+			sumCap += *m.Quota.RPD
+		}
+		n++
+	}
+	if n == 0 {
+		return
+	}
+	if st.Quota == nil {
+		st.Quota = &Quota{Tier: "free", Confidence: "estimate"}
+	}
+	st.Quota.RemainingRPD = &sumRem
+	st.Quota.UsedRPD = &sumUsed
+	if sumCap > 0 {
+		st.Quota.RPD = &sumCap
+	}
+	st.Quota.Scope = "per_model_aggregate"
+	st.Quota.Source = "local_aggregate"
+	st.Quota.Notes = fmt.Sprintf("Сумма remaining RPD по %d chat-моделям (у каждой свой лимит).", n)
 }
 
 // ChatCompletions routes a chat request, with auto-select and fallback on 429/5xx.
@@ -312,17 +387,24 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 		requested = "auto"
 	}
 
-	candidates, err := r.candidates(ctx, model, auto, opts)
+	candidates, why, err := r.candidates(ctx, model, auto, opts)
 	if err != nil {
 		logging.Errorf(ctx, "route_candidates_failed", "requested", requested, "err", err.Error())
 		return ChatResult{Status: 502}, err
 	}
 	if len(candidates) == 0 {
-		logging.Infof(ctx, "route_no_candidates", "requested", requested)
+		logging.Infof(ctx, "route_no_candidates", "requested", requested, "reason", why)
 		if auto {
 			return ChatResult{Status: 503}, fmt.Errorf("no available models for routing")
 		}
-		return ChatResult{Status: 404}, fmt.Errorf("model not found: %s", model)
+		switch why {
+		case "circuit_open":
+			return ChatResult{Status: 503}, fmt.Errorf("provider temporarily unavailable for model %s (circuit open after repeated errors; retry shortly)", model)
+		case "quota_exhausted":
+			return ChatResult{Status: 429}, fmt.Errorf("model temporarily unavailable (quota exhausted): %s", model)
+		default:
+			return ChatResult{Status: 404}, fmt.Errorf("model not found: %s", model)
+		}
 	}
 
 	logging.Debugf(ctx, "route_start",
@@ -335,6 +417,7 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 	var last ChatResult
 	var lastErr error
 	failedProviders := map[string]struct{}{}
+	emptyRetried := map[string]struct{}{}
 	attemptsStarted := 0
 	for i, c := range candidates {
 		if attemptsStarted >= r.opts.MaxAttempts {
@@ -351,7 +434,9 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 			logging.Debugf(ctx, "route_skip_provider_failed", "provider", p.Name(), "model", c.ID)
 			continue
 		}
-		if r.providerOpenCircuit(ctx, p.Name()) {
+		// Explicit primary model may bypass circuit once; auto-route still respects it.
+		forcedPrimary := !auto && i == 0 && c.ID == model
+		if !forcedPrimary && r.providerOpenCircuit(ctx, p.Name()) {
 			logging.Infof(ctx, "route_skip_circuit", "provider", p.Name(), "model", c.ID)
 			continue
 		}
@@ -427,13 +512,63 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 		)
 
 		if err == nil && status >= 200 && status < 300 {
+			if IsEmptyLengthCompletion(resp) {
+				logging.Infof(ctx, "empty_length_completion", "provider", p.Name(), "model", c.ID)
+				if _, did := emptyRetried[c.ID]; !did {
+					emptyRetried[c.ID] = struct{}{}
+					if bumped, berr := BumpMaxTokens(body, 256); berr == nil {
+						body = bumped
+					}
+					// One immediate retry on the same model with a safer budget.
+					retryBody, berr := setModel(body, c.ID)
+					if berr == nil {
+						retryBody, berr = SanitizeChatBody(p.Name(), retryBody)
+					}
+					if berr == nil {
+						rctx, rcancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
+						resp2, status2, hdr2, err2 := p.ChatCompletions(rctx, retryBody)
+						rcancel()
+						r.persistRateLimits(ctx, p.Name(), c.ID, hdr2)
+						attemptsStarted++
+						tried = append(tried, p.Name()+"/"+c.ID)
+						rec2 := AttemptRecord{Provider: p.Name(), Model: c.ID, Status: status2, Body: resp2}
+						if err2 != nil || status2 < 200 || status2 >= 300 {
+							rec2.ErrorType = classifyAttemptError(status2, err2)
+						}
+						attempted = append(attempted, rec2)
+						result.Attempts = len(tried)
+						result.Tried = tried
+						result.Attempted = attempted
+						if err2 == nil && status2 >= 200 && status2 < 300 && !IsEmptyLengthCompletion(resp2) {
+							result.Body = resp2
+							result.Status = status2
+							result.Headers = hdr2
+							return result, nil
+						}
+						last = result
+					}
+				}
+				lastErr = fmt.Errorf("empty completion (token budget exhausted) from %s/%s", p.Name(), c.ID)
+				logging.Infof(ctx, "route_fallback", "from", p.Name()+"/"+c.ID, "status", status, "reason", "empty_length")
+				continue
+			}
 			return result, nil
 		}
-		if !isRetryableStatus(status) {
+
+		// Soft-deny models that are listed but cannot serve chat right now.
+		if isModelUnusable(status, resp, err) {
+			r.denyModel(c.ID, r.denyTTL())
+			logging.Infof(ctx, "model_soft_denied", "provider", p.Name(), "model", c.ID, "status", status)
+		}
+
+		retryable := isRetryableStatus(status) || isModelUnusable(status, resp, err) || isUnsupportedParamError(resp)
+		if !retryable {
 			logging.Infof(ctx, "route_stop_non_retryable", "provider", p.Name(), "model", c.ID, "status", status)
 			return result, err
 		}
-		failedProviders[p.Name()] = struct{}{}
+		if status == 429 || status >= 500 {
+			failedProviders[p.Name()] = struct{}{}
+		}
 		logging.Infof(ctx, "route_fallback", "from", p.Name()+"/"+c.ID, "status", status, "attempt", attemptsStarted)
 	}
 
@@ -459,20 +594,104 @@ func classifyAttemptError(status int, err error) string {
 	if status == 404 {
 		return "not_found"
 	}
+	if status == 400 {
+		return "bad_request"
+	}
 	if err != nil || status >= 400 {
 		return "upstream"
 	}
 	return ""
 }
 
-func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts RouteOptions) ([]Model, error) {
+func (r *Registry) denyTTL() time.Duration {
+	ttl := 10 * time.Minute
+	if r.opts.ModelsCacheTTL > 0 {
+		if d := r.opts.ModelsCacheTTL * 4; d > ttl {
+			ttl = d
+		}
+	}
+	return ttl
+}
+
+func (r *Registry) denyModel(modelID string, ttl time.Duration) {
+	if modelID == "" || ttl <= 0 {
+		return
+	}
+	r.denyMu.Lock()
+	defer r.denyMu.Unlock()
+	if r.denyUntil == nil {
+		r.denyUntil = make(map[string]time.Time)
+	}
+	r.denyUntil[modelID] = time.Now().Add(ttl)
+}
+
+func (r *Registry) isDenied(modelID string) bool {
+	r.denyMu.Lock()
+	defer r.denyMu.Unlock()
+	until, ok := r.denyUntil[modelID]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(r.denyUntil, modelID)
+		return false
+	}
+	return true
+}
+
+func isRetryableStatus(status int) bool {
+	switch status {
+	case 429, 502, 503, 504:
+		return true
+	default:
+		return status >= 500
+	}
+}
+
+func isModelUnusable(status int, body json.RawMessage, err error) bool {
+	if status == 404 {
+		return true
+	}
+	msg := strings.ToLower(string(body))
+	if err != nil {
+		msg += " " + strings.ToLower(err.Error())
+	}
+	needles := []string{
+		"model not found",
+		"is not found",
+		"not found for",
+		"does not exist",
+		"unknown model",
+		"invalid model",
+		"unsupported model",
+		"no longer available",
+		"model is not available",
+	}
+	for _, n := range needles {
+		if strings.Contains(msg, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func isUnsupportedParamError(body json.RawMessage) bool {
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "unknown name") ||
+		strings.Contains(msg, "cannot find field") ||
+		strings.Contains(msg, "unsupported parameter") ||
+		strings.Contains(msg, "extra fields not permitted") ||
+		strings.Contains(msg, "unrecognized request argument")
+}
+
+func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts RouteOptions) ([]Model, string, error) {
 	filter := ListFilter{
 		Provider:    opts.Provider,
 		Recommended: opts.RecommendedOnly,
 	}
 	listed, err := r.ListModels(ctx, filter)
 	if err != nil && len(listed.Data) == 0 {
-		return nil, err
+		return nil, "", err
 	}
 
 	exclude := make(map[string]struct{}, len(opts.ExcludeModels))
@@ -483,6 +702,10 @@ func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts
 	available := make([]Model, 0, len(listed.Data))
 	for _, m := range listed.Data {
 		if _, skip := exclude[m.ID]; skip {
+			continue
+		}
+		if r.isDenied(m.ID) {
+			logging.Debugf(ctx, "candidate_skip_denied", "provider", m.Provider, "model", m.ID)
 			continue
 		}
 		if r.providerOpenCircuit(ctx, m.Provider) {
@@ -497,7 +720,7 @@ func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts
 	}
 
 	if auto {
-		return available, nil
+		return available, "none", nil
 	}
 
 	var primary *Model
@@ -510,35 +733,50 @@ func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts
 		}
 		rest = append(rest, available[i])
 	}
-	if primary == nil {
-		// Exhausted models are skipped above; still allow one forced try for explicit id.
-		r.mu.RLock()
-		p, ok := r.byModel[model]
-		r.mu.RUnlock()
-		if !ok {
-			// ensure cache/index loaded
-			_, _ = r.cachedModels(ctx)
-			r.mu.RLock()
-			p, ok = r.byModel[model]
-			r.mu.RUnlock()
-		}
-		if !ok {
-			return nil, nil
-		}
-		if r.providerOpenCircuit(ctx, p.Name()) {
-			return nil, nil
-		}
-		return []Model{{
-			ID:       model,
-			Provider: p.Name(),
-			Object:   "model",
-			OwnedBy:  p.Name(),
-		}}, nil
+	if primary != nil {
+		out := make([]Model, 0, 1+len(rest))
+		out = append(out, *primary)
+		out = append(out, rest...)
+		return out, "", nil
+	}
+
+	// Model known but skipped (quota/circuit): still force one try for explicit id.
+	// Other routable models remain as fallbacks.
+	known, providerName := r.lookupModelProvider(ctx, model, listed.Data)
+	if !known {
+		return nil, "not_found", nil
+	}
+	forced := Model{
+		ID:       model,
+		Provider: providerName,
+		Object:   "model",
+		OwnedBy:  providerName,
 	}
 	out := make([]Model, 0, 1+len(rest))
-	out = append(out, *primary)
+	out = append(out, forced)
 	out = append(out, rest...)
-	return out, nil
+	return out, "", nil
+}
+
+func (r *Registry) lookupModelProvider(ctx context.Context, model string, listed []Model) (bool, string) {
+	for _, m := range listed {
+		if m.ID == model {
+			return true, m.Provider
+		}
+	}
+	r.mu.RLock()
+	p, ok := r.byModel[model]
+	r.mu.RUnlock()
+	if !ok {
+		_, _ = r.cachedModels(ctx)
+		r.mu.RLock()
+		p, ok = r.byModel[model]
+		r.mu.RUnlock()
+	}
+	if !ok {
+		return false, ""
+	}
+	return true, p.Name()
 }
 
 func (r *Registry) providerOpenCircuit(ctx context.Context, providerName string) bool {
@@ -572,15 +810,6 @@ func isRoutable(m Model) bool {
 		return false
 	}
 	return true
-}
-
-func isRetryableStatus(status int) bool {
-	switch status {
-	case 429, 502, 503, 504:
-		return true
-	default:
-		return status >= 500
-	}
 }
 
 func (r *Registry) persistRateLimits(ctx context.Context, providerName, modelID string, hdr http.Header) {

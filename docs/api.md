@@ -1,11 +1,11 @@
 # API контракт для основной системы
 
-База: `http://localhost:8080`
+База API: `http://localhost:8080` · Gateway UI: `http://localhost:3000` (проксирует `/v1`, `/admin`, `/docs`)
 
 Интерактивно: [/docs](http://localhost:8080/docs) · спека: [/openapi.yaml](http://localhost:8080/openapi.yaml)  
 Архитектура и алгоритмы (Mermaid): [`architecture.md`](./architecture.md)
 
-Цель: основная система может **выбирать модель и источник**, зная лимиты, остаток запросов и **качество модели** (`rank` / `quality_score`), плюс смотреть статистику поддержки.
+Цель: основная система может **выбирать модель и источник**, зная лимиты, остаток запросов и **качество модели** (`rank` / `quality_score`), плюс смотреть статистику поддержки. UI упрощает setup ключей и Apply без `docker compose up`.
 
 ## Эндпоинты
 
@@ -14,6 +14,10 @@
 | `GET` | `/docs` | Swagger UI |
 | `GET` | `/openapi.yaml` | OpenAPI 3 |
 | `GET` | `/healthz` | liveness |
+| `GET` | `/admin/status` | setup / masked keys / defaults |
+| `PUT` | `/admin/keys` | сохранить ключи в runtime volume (+ `apply`) |
+| `PUT` | `/admin/defaults` | model/sampling defaults для gateway |
+| `POST` | `/admin/apply` | hot-reload провайдеров |
 | `GET` | `/v1/providers` | источники + их квоты/здоровье |
 | `GET` | `/v1/models` | модели с `source` + `quota` + `quality_score`/`rank` (лучшие первые) |
 | `GET` | `/v1/stats/summary` | агрегаты из PostgreSQL |
@@ -168,6 +172,21 @@ curl -s http://localhost:8080/v1/completion -H "Content-Type: application/json" 
 
 Основные параметры (принимаются API): `temperature`, `top_p`, `top_k`, `max_tokens`, `max_completion_tokens`, `n`, `stop`, `stream`, `presence_penalty`, `frequency_penalty`, `seed`, `user`, `response_format`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort`, `modalities`, `logit_bias`, `logprobs`, `top_logprobs`.
 
+Перед upstream прокси **отрезает** поля, которые конкретный провайдер не принимает (например Gemini: `presence_penalty`, `frequency_penalty`, `top_k`). Клиент может слать единый набор параметров.
+
+Жёсткая валидация до роутинга (иначе `400`):
+
+| Поле | Диапазон |
+|------|----------|
+| `temperature` | 0…2 |
+| `top_p` | 0.0…1.0 |
+| `top_k` | 1…200 |
+| `max_tokens` / `max_completion_tokens` | 8…128000 |
+| `presence_penalty` / `frequency_penalty` | −2…2 |
+| `n` | только `1` |
+
+Пустой ответ с `finish_reason=length` (типично при слишком маленьком `max_tokens`) → один retry с бюджетом ≥256, затем fallback.
+
 Перед upstream тело **санитизируется** под провайдер:
 
 | Поле | Gemini | Groq | OpenRouter |
@@ -216,3 +235,25 @@ Authorization: Bearer <PROXY_API_KEY>
 ## POST `/v1/route`
 
 Тело как chat + опционально `provider`, `recommended_only`, `exclude_models` (не уходят upstream). `model` принудительно `auto`.
+
+## Admin (Gateway UI)
+
+Используются консолью на `:3000`. Ключи пишутся в runtime volume (`RUNTIME_DATA_DIR`, по умолчанию `/data`) и применяются hot-reload'ом — **без** `docker compose up`.
+
+```bash
+# статус / masked keys / defaults
+curl -s http://localhost:8080/admin/status
+
+# сохранить ключ и сразу применить
+curl -s -X PUT http://localhost:8080/admin/keys \
+  -H "Content-Type: application/json" \
+  -d '{"gemini_api_key":"...","apply":true}'
+
+# defaults модели/семплинга
+curl -s -X PUT http://localhost:8080/admin/defaults \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","temperature":0.2}'
+
+# явный reload из runtime + env
+curl -s -X POST http://localhost:8080/admin/apply
+```

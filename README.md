@@ -9,26 +9,26 @@ HTTP-прокси для работы с разными LLM через един�
 **Windows:**
 
 ```powershell
-copy .env.example .env
-# впиши GEMINI_API_KEY / GROQ_API_KEY / OPENROUTER_API_KEY
 .\scripts\start.ps1
+# открой UI → вставь ключи провайдеров → Применить
 ```
 
 **Linux / macOS:**
 
 ```bash
-cp .env.example .env
-# впиши ключи
 chmod +x scripts/*.sh
 ./scripts/start.sh
 ```
 
 | Сервис | URL |
 |--------|-----|
-| Proxy | http://localhost:8080 |
-| Swagger | http://localhost:8080/docs |
-| Architecture | http://localhost:8080/architecture |
+| **UI (gateway console)** | http://localhost:3000 |
+| Proxy API | http://localhost:8080 |
+| Swagger | http://localhost:3000/docs |
+| Architecture | http://localhost:3000/architecture |
 | pgAdmin | http://localhost:5050 (`admin@example.com` / `admin`) |
+
+Ключи можно не класть в `.env`: мастер в UI пишет их в runtime volume и делает hot-reload.
 
 Остановка: `.\scripts\stop.ps1` / `./scripts/stop.sh`.
 

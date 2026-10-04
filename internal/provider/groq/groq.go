@@ -74,6 +74,9 @@ func (c *Client) ListModels(ctx context.Context) ([]provider.Model, error) {
 	src := provider.Source{ID: providerName, Name: c.DisplayName()}
 	out := make([]provider.Model, 0, len(raw.Data))
 	for _, m := range raw.Data {
+		if !provider.IsChatCapable(providerName, m.ID) {
+			continue
+		}
 		owned := m.OwnedBy
 		if owned == "" {
 			owned = "groq"

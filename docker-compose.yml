@@ -53,10 +53,27 @@ services:
       DB_HOST: postgres
       DB_PORT: "5432"
       OPENAPI_PATH: /app/api/openapi.yaml
+      RUNTIME_DATA_DIR: /data
+    volumes:
+      - runtime_data:/data
     depends_on:
       postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: llm-proxy-web:local
+    container_name: llm-proxy-web
+    restart: unless-stopped
+    ports:
+      - "${UI_PORT:-3000}:80"
+    depends_on:
+      proxy:
         condition: service_healthy
 
 volumes:
   pgdata:
   pgadmin_data:
+  runtime_data:

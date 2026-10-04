@@ -75,6 +75,9 @@ func (c *Client) ListModels(ctx context.Context) ([]provider.Model, error) {
 	out := make([]provider.Model, 0, len(raw.Data))
 	for _, m := range raw.Data {
 		id := strings.TrimPrefix(m.ID, "models/")
+		if !provider.IsChatCapable(providerName, id) {
+			continue
+		}
 		owned := m.OwnedBy
 		if owned == "" {
 			owned = "google"

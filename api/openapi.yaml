@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: LLM Proxy API
-  version: 0.5.0
+  version: 0.6.0
   description: |
     HTTP-прокси над бесплатными LLM-источниками (Gemini, Groq, OpenRouter).
 
@@ -113,6 +113,68 @@ paths:
             application/yaml:
               schema:
                 type: string
+
+  /admin/status:
+    get:
+      tags: [system]
+      summary: UI/runtime status
+      description: Setup flag, masked keys, gateway defaults.
+      operationId: adminStatus
+      responses:
+        "200":
+          description: Status snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /admin/keys:
+    put:
+      tags: [system]
+      summary: Save provider API keys (runtime volume) and optionally apply
+      operationId: adminKeys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                gemini_api_key: { type: string }
+                groq_api_key: { type: string }
+                openrouter_api_key: { type: string }
+                apply: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Updated status
+        "400":
+          $ref: "#/components/responses/ProxyError"
+
+  /admin/defaults:
+    put:
+      tags: [system]
+      summary: Save default model/sampling for gateway UI
+      operationId: adminDefaults
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Saved defaults
+
+  /admin/apply:
+    post:
+      tags: [system]
+      summary: Hot-reload providers from runtime + env keys
+      operationId: adminApply
+      responses:
+        "200":
+          description: Reloaded status
 
   /v1/providers:
     get:

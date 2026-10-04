@@ -36,6 +36,7 @@ type Config struct {
 	OpenRouterBaseURL string
 	OpenRouterSiteURL string
 	OpenRouterTitle   string
+	RuntimeDataDir    string
 }
 
 func Load() (Config, error) {
@@ -65,6 +66,7 @@ func Load() (Config, error) {
 		OpenRouterBaseURL:   envOr("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
 		OpenRouterSiteURL:   envOr("OPENROUTER_SITE_URL", "http://localhost:8080"),
 		OpenRouterTitle:     envOr("OPENROUTER_SITE_TITLE", "llm-proxy"),
+		RuntimeDataDir:      envOr("RUNTIME_DATA_DIR", ".runtime"),
 	}
 
 	if cfg.MaxFallbackAttempts < 1 {
@@ -74,9 +76,7 @@ func Load() (Config, error) {
 		cfg.UpstreamTimeout = time.Second
 	}
 
-	if cfg.GeminiAPIKey == "" && cfg.GroqAPIKey == "" && cfg.OpenRouterAPIKey == "" {
-		return Config{}, fmt.Errorf("at least one provider API key is required (GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY)")
-	}
+	// Keys may be empty at boot — UI wizard / runtime volume can supply them later.
 	if cfg.DBHost == "" || cfg.DBPort == "" || cfg.DBUser == "" || cfg.DBName == "" {
 		return Config{}, fmt.Errorf("DB_HOST, DB_PORT, DB_USER, DB_NAME are required")
 	}

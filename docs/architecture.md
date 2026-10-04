@@ -19,7 +19,9 @@
 
 ```mermaid
 flowchart LR
-  Main[Main system] --> API[LLM Proxy :8080]
+  UI[Gateway UI :3000] --> API[LLM Proxy :8080]
+  Main[Main system] --> API
+  API --> RT[(runtime volume)]
   API --> G[Gemini]
   API --> Q[Groq]
   API --> O[OpenRouter]
@@ -31,11 +33,16 @@ flowchart LR
 
 | Компонент | Путь / сервис | Роль |
 |-----------|---------------|------|
-| HTTP API | `internal/api` | ручки, Swagger, запись usage |
+| Gateway UI | `web/` · compose `web` | setup ключей, квоты, stats, test chat, Apply |
+| HTTP API | `internal/api` | ручки, Swagger, admin, запись usage |
+| Runtime | `internal/runtime` | keys/defaults в volume, hot-reload без `compose up` |
 | Registry | `internal/provider` | агрегация, auto-route, fallback 429/5xx |
 | Providers | `internal/provider/{gemini,groq,openrouter}` | upstream OpenAI-compat клиенты |
 | Quota catalog | `internal/quota` | статические лимиты Free Tier |
-| Ranking | `internal/ranking` | `quality_score` (выше = умнее) |
+| Ranking | `internal/ranking` | `quality_score` (выше = умнее; free-tier предпочитает надёжный Flash) |
+| Chat filter | `internal/provider/capability.go` | в каталог/роутинг только chat-capable модели |
+| Soft-deny | registry `denyUntil` | временно исключает id после 404 / model-unusable |
+| Circuit | `provider_health` | только 5xx/timeout; 429/400/404 провайдера не глушат |
 | Store | `internal/store` | PostgreSQL: events, counters, health, rate_limits, migrations |
 | Postgres | `docker-compose` service `postgres` | persistence |
 | pgAdmin | `docker-compose` service `pgadmin` | UI БД |

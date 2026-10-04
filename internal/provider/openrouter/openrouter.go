@@ -86,6 +86,9 @@ func (c *Client) ListModels(ctx context.Context) ([]provider.Model, error) {
 		if !isFreeModel(m.ID, m.Pricing != nil && isZeroPrice(m.Pricing.Prompt) && isZeroPrice(m.Pricing.Completion)) {
 			continue
 		}
+		if !provider.IsChatCapable(providerName, m.ID) {
+			continue
+		}
 		out = append(out, provider.Model{
 			ID:          m.ID,
 			Object:      "model",

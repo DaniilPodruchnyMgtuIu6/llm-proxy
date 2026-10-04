@@ -27,10 +27,12 @@ chmod +x scripts/*.sh
 
 | Сервис | URL |
 |--------|-----|
+| **UI** | http://localhost:3000 — ключи, квоты, stats, test chat |
 | Proxy / API | http://localhost:8080 |
-| Swagger | http://localhost:8080/docs |
-| Architecture | http://localhost:8080/architecture |
+| Swagger | http://localhost:3000/docs |
 | pgAdmin | http://localhost:5050 (`admin@example.com` / `admin`) |
+
+Ключи провайдеров: UI → Setup/Ключи → «Сохранить и применить» (без повторного `compose up`).
 
 Остановка: `.\scripts\stop.ps1` или `./scripts/stop.sh`.
 

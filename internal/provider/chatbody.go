@@ -22,14 +22,16 @@ var chatFieldMeta = map[string]struct {
 	"n":                     {all: true},
 	"stop":                  {all: true},
 	"stream":                {all: true},
-	"presence_penalty":      {all: true},
-	"frequency_penalty":     {all: true},
-	"seed":                  {all: true},
-	"user":                  {all: true},
-	"response_format":       {all: true},
-	"tools":                 {all: true},
-	"tool_choice":           {all: true},
-	"parallel_tool_calls":   {all: true},
+	// Gemini OpenAI-compat rejects these ("Unknown name ... Cannot find field").
+	"presence_penalty":  {gemini: false, groq: true, openrouter: true},
+	"frequency_penalty": {gemini: false, groq: true, openrouter: true},
+
+	"seed":                {all: true},
+	"user":                {all: true},
+	"response_format":     {all: true},
+	"tools":               {all: true},
+	"tool_choice":         {all: true},
+	"parallel_tool_calls": {all: true},
 
 	// Not in core OpenAI chat schema; useful where upstream accepts it.
 	"top_k": {gemini: false, groq: false, openrouter: true},
@@ -39,9 +41,9 @@ var chatFieldMeta = map[string]struct {
 	"modalities":       {gemini: true, groq: false, openrouter: false},
 
 	// Often rejected by Groq; OpenRouter may pass through.
-	"logit_bias":    {gemini: false, groq: false, openrouter: true},
-	"logprobs":      {gemini: false, groq: false, openrouter: true},
-	"top_logprobs":  {gemini: false, groq: false, openrouter: true},
+	"logit_bias":   {gemini: false, groq: false, openrouter: true},
+	"logprobs":     {gemini: false, groq: false, openrouter: true},
+	"top_logprobs": {gemini: false, groq: false, openrouter: true},
 }
 
 // SanitizeChatBody keeps only fields the target provider is known to accept.
