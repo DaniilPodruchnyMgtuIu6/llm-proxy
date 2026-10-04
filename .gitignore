@@ -1,0 +1,11 @@
+.env
+*.exe
+bin/
+dist/
+data/
+*.db
+*.db-journal
+.idea/
+.vscode/
+*.log
+.DS_Store
