@@ -189,6 +189,30 @@ curl -s http://localhost:8080/v1/completion -H "Content-Type: application/json" 
 - Все строки лога содержат `req_id=...`; в PostgreSQL `usage_events.request_id` = этот же proxy id.
 - Уровень: env `LOG_LEVEL=error|info|debug` (по умолчанию `info`). `debug` включает попытки роутинга/fallback и `upstream_id`.
 
+### Auth (опционально)
+
+Если в `.env` задан `PROXY_API_KEY`, все `/v1/*` требуют:
+
+```http
+Authorization: Bearer <PROXY_API_KEY>
+```
+
+или `X-API-Key: <PROXY_API_KEY>`.  
+Без ключа (`PROXY_API_KEY` пустой) — открытый доступ как раньше.  
+Публично без ключа: `/healthz`, `/docs`, `/openapi.yaml`, `/architecture`.
+
+### Reliability
+
+| Env | Default | Смысл |
+|-----|---------|--------|
+| `UPSTREAM_TIMEOUT` | `60s` | deadline одной upstream-попытки |
+| `MAX_FALLBACK_ATTEMPTS` | `3` | максимум upstream-попыток; после 429 провайдер skip'ается в этом запросе |
+| `MODELS_CACHE_TTL` | `45s` | кэш каталога `/v1/models` |
+| `CIRCUIT_BREAKER_ERRORS` | `5` | подряд ошибок → временно skip provider |
+| `CIRCUIT_BREAKER_COOLDOWN` | `5m` | сколько держать circuit open |
+
+Кандидаты с `remaining_rpd/rpm/tpm == 0` не вызываются. Usage пишется **на каждую** attempt (включая 429).
+
 ## POST `/v1/route`
 
 Тело как chat + опционально `provider`, `recommended_only`, `exclude_models` (не уходят upstream). `model` принудительно `auto`.

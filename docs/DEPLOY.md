@@ -102,6 +102,22 @@ docker compose logs -f proxy
 - Свой id: `curl -H "X-Request-ID: my-debug-1" ...`
 - Подробности: в `.env` поставь `LOG_LEVEL=debug` и `docker compose up -d --force-recreate proxy`
 
+## Опциональный API-ключ прокси
+
+В `.env` друга:
+
+```env
+PROXY_API_KEY=super-secret
+```
+
+Тогда вызовы:
+
+```bash
+curl -H "Authorization: Bearer super-secret" http://localhost:8080/v1/models
+```
+
+`/docs` и `/healthz` остаются без ключа.
+
 ## Частые проблемы
 
 | Симптом | Что сделать |

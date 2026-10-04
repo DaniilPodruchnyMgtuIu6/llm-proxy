@@ -266,6 +266,20 @@ docker compose up -d
 | `DB_NAME` | `llmproxy` |
 | `DB_SSLMODE` | `disable` |
 | `ADDR` | `:8080` |
+| `LOG_LEVEL` | `info` |
+| `PROXY_API_KEY` | пусто (auth выкл.) |
+| `UPSTREAM_TIMEOUT` | `60s` |
+| `MAX_FALLBACK_ATTEMPTS` | `3` |
+| `MODELS_CACHE_TTL` | `45s` |
+| `CIRCUIT_BREAKER_ERRORS` | `5` |
+| `CIRCUIT_BREAKER_COOLDOWN` | `5m` |
 | `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` | — |
 
 DSN для pgx собирается в `config.Load()` из `DB_*`. См. `.env.example`.
+
+## 11. Reliability (кратко)
+
+- На каждую upstream-попытку — свой timeout и запись в `usage_events`.
+- Fallback ограничен `MAX_FALLBACK_ATTEMPTS`; 429/5xx → следующий кандидат.
+- Skip при нулевом remaining (RPD/RPM/TPM) и при open circuit (`provider_health`).
+- Каталог моделей кэшируется на `MODELS_CACHE_TTL`.

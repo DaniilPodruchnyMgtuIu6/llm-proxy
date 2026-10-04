@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: LLM Proxy API
-  version: 0.4.2
+  version: 0.5.0
   description: |
     HTTP-прокси над бесплатными LLM-источниками (Gemini, Groq, OpenRouter).
 
@@ -9,8 +9,12 @@ info:
     1. `GET /v1/providers` — здоровье источников и квоты пулов  
     2. `GET /v1/models` — модели уже отсортированы: `rank=1` самая сильная  
     3. `POST /v1/route` или `POST /v1/chat/completions` с `model:"auto"` — прокси сам выберет модель  
-    4. Либо явный `model` — при 429/5xx прокси сделает fallback на следующий кандидат  
+    4. Либо явный `model` — при 429/5xx прокси сделает fallback (лимит попыток / timeout)  
     5. `GET /v1/stats/summary` — статистика из PostgreSQL  
+
+    ## Auth (опционально)
+    Если задан `PROXY_API_KEY`, для `/v1/*` нужен `Authorization: Bearer <key>` или `X-API-Key`.
+    Публичны: `/healthz`, `/docs`, `/openapi.yaml`, `/architecture`.  
 
     ## Квоты
     - `quota.source=live` — live remaining (OpenRouter)  
@@ -177,6 +181,7 @@ paths:
       operationId: chatCompletions
       parameters:
         - $ref: "#/components/parameters/RequestID"
+        - $ref: "#/components/parameters/ProxyAPIKey"
       requestBody:
         required: true
         content:
@@ -390,6 +395,16 @@ components:
         maxLength: 128
         pattern: '^[A-Za-z0-9._-]{1,128}$'
         example: my-debug-42
+    ProxyAPIKey:
+      name: Authorization
+      in: header
+      required: false
+      description: |
+        Если на сервере задан `PROXY_API_KEY` — обязателен для `/v1/*`.
+        Формат: `Bearer <PROXY_API_KEY>`. Альтернатива: заголовок `X-API-Key`.
+      schema:
+        type: string
+        example: Bearer my-secret
 
   schemas:
     Source:
