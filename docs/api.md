@@ -180,7 +180,14 @@ curl -s http://localhost:8080/v1/completion -H "Content-Type: application/json" 
 | n ≠ 1 | да | нет (отбрасываем) | да |
 
 При 429/502/503/504 — fallback на следующий кандидат по `rank`.  
-Заголовки ответа: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`.
+Заголовки ответа: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`, `X-Request-ID`.
+
+### Request ID и логи
+
+- Можно передать свой id: заголовок `X-Request-ID` (буквы/цифры/`-_./`, до 128 символов).
+- Если не передан — прокси сгенерирует UUID и вернёт в `X-Request-ID`.
+- Все строки лога содержат `req_id=...`; в PostgreSQL `usage_events.request_id` = этот же proxy id.
+- Уровень: env `LOG_LEVEL=error|info|debug` (по умолчанию `info`). `debug` включает попытки роутинга/fallback и `upstream_id`.
 
 ## POST `/v1/route`
 

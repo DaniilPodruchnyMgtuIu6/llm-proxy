@@ -91,6 +91,17 @@ Add Server:
 - Port: `5432` (или `DB_PORT` из `.env`)
 - User / Password / Database: `llmproxy` / `llmproxy` / `llmproxy`
 
+## Логи
+
+```bash
+docker compose logs -f proxy
+```
+
+Формат: `req_id=... level=info msg=chat_done provider=... model=...`.
+
+- Свой id: `curl -H "X-Request-ID: my-debug-1" ...`
+- Подробности: в `.env` поставь `LOG_LEVEL=debug` и `docker compose up -d --force-recreate proxy`
+
 ## Частые проблемы
 
 | Симптом | Что сделать |
