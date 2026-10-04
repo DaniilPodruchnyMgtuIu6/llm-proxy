@@ -203,6 +203,45 @@ WHERE day = $1::date AND pool_id = $2
 	return n, err
 }
 
+type ProviderHealth struct {
+	Provider           string
+	LastSuccessAt      *time.Time
+	LastErrorAt        *time.Time
+	LastError          string
+	ConsecutiveErrors  int64
+}
+
+func (s *Store) GetProviderHealth(ctx context.Context, provider string) (ProviderHealth, bool, error) {
+	if s == nil || provider == "" {
+		return ProviderHealth{}, false, nil
+	}
+	var h ProviderHealth
+	var lastOK, lastErr sql.NullTime
+	var lastErrMsg sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT provider, last_success_at, last_error_at, last_error, consecutive_errors
+FROM provider_health WHERE provider = $1
+`, provider).Scan(&h.Provider, &lastOK, &lastErr, &lastErrMsg, &h.ConsecutiveErrors)
+	if err == sql.ErrNoRows {
+		return ProviderHealth{}, false, nil
+	}
+	if err != nil {
+		return ProviderHealth{}, false, err
+	}
+	if lastOK.Valid {
+		t := lastOK.Time.UTC()
+		h.LastSuccessAt = &t
+	}
+	if lastErr.Valid {
+		t := lastErr.Time.UTC()
+		h.LastErrorAt = &t
+	}
+	if lastErrMsg.Valid {
+		h.LastError = lastErrMsg.String
+	}
+	return h, true, nil
+}
+
 func (s *Store) Summary(ctx context.Context, fromDay, toDay, provider string) (Summary, error) {
 	out := Summary{From: fromDay, To: toDay}
 	if s == nil {

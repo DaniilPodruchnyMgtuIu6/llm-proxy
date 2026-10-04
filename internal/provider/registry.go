@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -15,12 +16,37 @@ import (
 	"github.com/llm-proxy/llm-proxy/internal/store"
 )
 
+// Options tunes routing reliability behaviour.
+type Options struct {
+	UpstreamTimeout time.Duration
+	MaxAttempts     int
+	ModelsCacheTTL  time.Duration
+	CircuitErrors   int64
+	CircuitCooldown time.Duration
+}
+
+func DefaultOptions() Options {
+	return Options{
+		UpstreamTimeout: 60 * time.Second,
+		MaxAttempts:     3,
+		ModelsCacheTTL:  45 * time.Second,
+		CircuitErrors:   5,
+		CircuitCooldown: 5 * time.Minute,
+	}
+}
+
 // Registry aggregates providers and routes chat requests by model id.
 type Registry struct {
 	mu        sync.RWMutex
 	providers []Provider
 	byModel   map[string]Provider
 	store     *store.Store
+	opts      Options
+
+	cacheMu    sync.Mutex
+	cacheAt    time.Time
+	cacheAll   []Model
+	cacheIndex map[string]Provider
 }
 
 // RouteOptions controls auto-routing / fallback candidate selection.
@@ -30,32 +56,102 @@ type RouteOptions struct {
 	ExcludeModels   []string
 }
 
+// AttemptRecord is one upstream try (for usage/stats).
+type AttemptRecord struct {
+	Provider   string
+	Model      string
+	Status     int
+	LatencyMS  int64
+	ErrorType  string
+	Body       json.RawMessage
+}
+
 // ChatResult is the outcome of a (possibly multi-attempt) chat completion.
 type ChatResult struct {
-	Body     json.RawMessage
-	Status   int
-	Headers  http.Header
-	Provider string
-	Model    string
-	Attempts int
-	Tried    []string
+	Body      json.RawMessage
+	Status    int
+	Headers   http.Header
+	Provider  string
+	Model     string
+	Attempts  int
+	Tried     []string
+	Attempted []AttemptRecord
 }
 
 func NewRegistry(st *store.Store, providers ...Provider) *Registry {
+	return NewRegistryWithOptions(st, DefaultOptions(), providers...)
+}
+
+func NewRegistryWithOptions(st *store.Store, opts Options, providers ...Provider) *Registry {
+	if opts.MaxAttempts < 1 {
+		opts.MaxAttempts = 1
+	}
+	if opts.UpstreamTimeout < time.Second {
+		opts.UpstreamTimeout = time.Second
+	}
 	return &Registry{
-		providers: providers,
-		byModel:   make(map[string]Provider),
-		store:     st,
+		providers:  providers,
+		byModel:    make(map[string]Provider),
+		store:      st,
+		opts:       opts,
+		cacheIndex: make(map[string]Provider),
 	}
 }
 
 func (r *Registry) ListModels(ctx context.Context, filter ListFilter) (ModelsResponse, error) {
+	all, err := r.cachedModels(ctx)
+	if err != nil && len(all) == 0 {
+		return ModelsResponse{}, err
+	}
+
+	out := ModelsResponse{Object: "list", Data: make([]Model, 0, len(all))}
+	for _, m := range all {
+		if filter.Provider != "" && !strings.EqualFold(filter.Provider, m.Provider) {
+			continue
+		}
+		if filter.FreeOnly && !m.Free {
+			continue
+		}
+		if filter.Recommended && !m.Recommended {
+			continue
+		}
+		out.Data = append(out.Data, m)
+	}
+	for i := range out.Data {
+		out.Data[i].Rank = i + 1
+	}
+	return out, nil
+}
+
+func (r *Registry) cachedModels(ctx context.Context) ([]Model, error) {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+
+	if r.opts.ModelsCacheTTL > 0 && time.Since(r.cacheAt) < r.opts.ModelsCacheTTL && len(r.cacheAll) > 0 {
+		logging.Debugf(ctx, "models_cache_hit", "age_ms", time.Since(r.cacheAt).Milliseconds(), "count", len(r.cacheAll))
+		r.mu.Lock()
+		r.byModel = r.cacheIndex
+		r.mu.Unlock()
+		return r.cacheAll, nil
+	}
+
+	all, index, err := r.fetchAllModels(ctx)
+	if err != nil && len(all) == 0 {
+		return nil, err
+	}
+	r.cacheAll = all
+	r.cacheIndex = index
+	r.cacheAt = time.Now()
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.byModel = index
+	r.mu.Unlock()
+	logging.Debugf(ctx, "models_cache_refresh", "count", len(all), "ttl", r.opts.ModelsCacheTTL.String())
+	return all, err
+}
 
-	r.byModel = make(map[string]Provider)
-	out := ModelsResponse{Object: "list", Data: make([]Model, 0)}
-
+func (r *Registry) fetchAllModels(ctx context.Context) ([]Model, map[string]Provider, error) {
+	index := make(map[string]Provider)
+	out := make([]Model, 0)
 	var firstErr error
 	for _, p := range r.providers {
 		models, err := p.ListModels(ctx)
@@ -66,37 +162,23 @@ func (r *Registry) ListModels(ctx context.Context, filter ListFilter) (ModelsRes
 			continue
 		}
 		for _, m := range models {
-			r.byModel[m.ID] = p
+			index[m.ID] = p
 			m.QualityScore = ranking.Score(m.Provider, m.ID)
 			r.applyLocalQuota(ctx, &m)
 			r.applyRateLimitQuota(ctx, &m)
-			if filter.Provider != "" && !strings.EqualFold(filter.Provider, p.Name()) {
-				continue
-			}
-			if filter.FreeOnly && !m.Free {
-				continue
-			}
-			if filter.Recommended && !m.Recommended {
-				continue
-			}
-			out.Data = append(out.Data, m)
+			out = append(out, m)
 		}
 	}
-	if len(out.Data) == 0 && firstErr != nil {
-		return ModelsResponse{}, firstErr
+	if len(out) == 0 && firstErr != nil {
+		return nil, index, firstErr
 	}
-
-	sort.SliceStable(out.Data, func(i, j int) bool {
-		if out.Data[i].QualityScore != out.Data[j].QualityScore {
-			return out.Data[i].QualityScore > out.Data[j].QualityScore
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].QualityScore != out[j].QualityScore {
+			return out[i].QualityScore > out[j].QualityScore
 		}
-		return out.Data[i].ID < out.Data[j].ID
+		return out[i].ID < out[j].ID
 	})
-	for i := range out.Data {
-		out.Data[i].Rank = i + 1
-	}
-
-	return out, nil
+	return out, index, nil
 }
 
 func (r *Registry) applyLocalQuota(ctx context.Context, m *Model) {
@@ -185,6 +267,12 @@ func (r *Registry) ListProviders(ctx context.Context) (ProvidersResponse, error)
 				Docs:    p.DocsURL(),
 			}
 		}
+		if r.providerOpenCircuit(ctx, p.Name()) {
+			st.Healthy = false
+			if st.Error == "" {
+				st.Error = "circuit_open"
+			}
+		}
 		if st.Quota != nil && r.store != nil && !(st.Quota.Source == "live" && st.Quota.RemainingRPD != nil) {
 			day := store.DayBucket(st.ID, time.Now())
 			if st.Quota.PoolID != "" {
@@ -205,7 +293,6 @@ func (r *Registry) ListProviders(ctx context.Context) (ProvidersResponse, error)
 }
 
 // ChatCompletions routes a chat request, with auto-select and fallback on 429/5xx.
-// Empty / missing model (or "auto") picks the best available candidate.
 func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, opts RouteOptions) (ChatResult, error) {
 	var req struct {
 		Model    string          `json:"model"`
@@ -238,47 +325,89 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 		return ChatResult{Status: 404}, fmt.Errorf("model not found: %s", model)
 	}
 
-	logging.Debugf(ctx, "route_start", "requested", requested, "candidates", len(candidates))
+	logging.Debugf(ctx, "route_start",
+		"requested", requested,
+		"candidates", len(candidates),
+		"max_attempts", r.opts.MaxAttempts,
+		"timeout", r.opts.UpstreamTimeout.String(),
+	)
 
 	var last ChatResult
 	var lastErr error
+	failedProviders := map[string]struct{}{}
+	attemptsStarted := 0
 	for i, c := range candidates {
+		if attemptsStarted >= r.opts.MaxAttempts {
+			logging.Debugf(ctx, "route_max_attempts_reached", "max", r.opts.MaxAttempts)
+			break
+		}
 		r.mu.RLock()
 		p, ok := r.byModel[c.ID]
 		r.mu.RUnlock()
 		if !ok {
 			continue
 		}
+		if _, skip := failedProviders[p.Name()]; skip {
+			logging.Debugf(ctx, "route_skip_provider_failed", "provider", p.Name(), "model", c.ID)
+			continue
+		}
+		if r.providerOpenCircuit(ctx, p.Name()) {
+			logging.Infof(ctx, "route_skip_circuit", "provider", p.Name(), "model", c.ID)
+			continue
+		}
+		attemptsStarted++
 
 		attemptBody, err := setModel(body, c.ID)
 		if err != nil {
-			last = ChatResult{Status: 400, Provider: c.Provider, Model: c.ID}
+			last = ChatResult{Status: 400, Provider: c.Provider, Model: c.ID, Attempted: last.Attempted}
 			lastErr = err
 			logging.Debugf(ctx, "route_attempt_prepare_failed", "provider", c.Provider, "model", c.ID, "err", err.Error())
 			continue
 		}
 		attemptBody, err = SanitizeChatBody(p.Name(), attemptBody)
 		if err != nil {
-			last = ChatResult{Status: 400, Provider: c.Provider, Model: c.ID}
+			last = ChatResult{Status: 400, Provider: c.Provider, Model: c.ID, Attempted: last.Attempted}
 			lastErr = err
 			logging.Debugf(ctx, "route_attempt_sanitize_failed", "provider", p.Name(), "model", c.ID, "err", err.Error())
 			continue
 		}
 
 		attemptStart := time.Now()
-		resp, status, hdr, err := p.ChatCompletions(ctx, attemptBody)
+		actx, cancel := context.WithTimeout(ctx, r.opts.UpstreamTimeout)
+		resp, status, hdr, err := p.ChatCompletions(actx, attemptBody)
+		timedOut := errors.Is(actx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+		cancel()
+		if timedOut {
+			status = 504
+			if err == nil || errors.Is(err, context.DeadlineExceeded) {
+				err = fmt.Errorf("upstream timeout after %s", r.opts.UpstreamTimeout)
+			}
+		}
 		r.persistRateLimits(ctx, p.Name(), c.ID, hdr)
 		attemptMS := time.Since(attemptStart).Milliseconds()
 
 		tried := append(last.Tried, p.Name()+"/"+c.ID)
+		rec := AttemptRecord{
+			Provider:  p.Name(),
+			Model:     c.ID,
+			Status:    status,
+			LatencyMS: attemptMS,
+			Body:      resp,
+		}
+		if err != nil || status < 200 || status >= 300 {
+			rec.ErrorType = classifyAttemptError(status, err)
+		}
+		attempted := append(last.Attempted, rec)
+
 		result := ChatResult{
-			Body:     resp,
-			Status:   status,
-			Headers:  hdr,
-			Provider: p.Name(),
-			Model:    c.ID,
-			Attempts: len(tried),
-			Tried:    tried,
+			Body:      resp,
+			Status:    status,
+			Headers:   hdr,
+			Provider:  p.Name(),
+			Model:     c.ID,
+			Attempts:  len(tried),
+			Tried:     tried,
+			Attempted: attempted,
 		}
 		last = result
 		lastErr = err
@@ -287,14 +416,13 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 		if err != nil {
 			errStr = err.Error()
 		}
-		upstreamID := peekUpstreamID(resp)
 		logging.Debugf(ctx, "route_attempt",
 			"n", i+1,
 			"provider", p.Name(),
 			"model", c.ID,
 			"status", status,
 			"latency_ms", attemptMS,
-			"upstream_id", upstreamID,
+			"upstream_id", peekUpstreamID(resp),
 			"err", errStr,
 		)
 
@@ -305,7 +433,8 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 			logging.Infof(ctx, "route_stop_non_retryable", "provider", p.Name(), "model", c.ID, "status", status)
 			return result, err
 		}
-		logging.Infof(ctx, "route_fallback", "from", p.Name()+"/"+c.ID, "status", status)
+		failedProviders[p.Name()] = struct{}{}
+		logging.Infof(ctx, "route_fallback", "from", p.Name()+"/"+c.ID, "status", status, "attempt", attemptsStarted)
 	}
 
 	if last.Status == 0 {
@@ -315,6 +444,25 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 		lastErr = fmt.Errorf("all routing candidates failed")
 	}
 	return last, lastErr
+}
+
+func classifyAttemptError(status int, err error) string {
+	if status == 429 {
+		return "rate_limit"
+	}
+	if status == 504 || (err != nil && strings.Contains(err.Error(), "timeout")) {
+		return "timeout"
+	}
+	if status == 402 {
+		return "credits"
+	}
+	if status == 404 {
+		return "not_found"
+	}
+	if err != nil || status >= 400 {
+		return "upstream"
+	}
+	return ""
 }
 
 func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts RouteOptions) ([]Model, error) {
@@ -337,7 +485,12 @@ func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts
 		if _, skip := exclude[m.ID]; skip {
 			continue
 		}
+		if r.providerOpenCircuit(ctx, m.Provider) {
+			logging.Debugf(ctx, "candidate_skip_circuit", "provider", m.Provider, "model", m.ID)
+			continue
+		}
 		if !isRoutable(m) {
+			logging.Debugf(ctx, "candidate_skip_quota", "provider", m.Provider, "model", m.ID)
 			continue
 		}
 		available = append(available, m)
@@ -347,7 +500,6 @@ func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts
 		return available, nil
 	}
 
-	// Prefer requested model first, then remaining by rank.
 	var primary *Model
 	rest := make([]Model, 0, len(available))
 	for i := range available {
@@ -359,11 +511,21 @@ func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts
 		rest = append(rest, available[i])
 	}
 	if primary == nil {
-		// Model may be filtered out as exhausted — still try it once if registered.
+		// Exhausted models are skipped above; still allow one forced try for explicit id.
 		r.mu.RLock()
 		p, ok := r.byModel[model]
 		r.mu.RUnlock()
 		if !ok {
+			// ensure cache/index loaded
+			_, _ = r.cachedModels(ctx)
+			r.mu.RLock()
+			p, ok = r.byModel[model]
+			r.mu.RUnlock()
+		}
+		if !ok {
+			return nil, nil
+		}
+		if r.providerOpenCircuit(ctx, p.Name()) {
 			return nil, nil
 		}
 		return []Model{{
@@ -379,6 +541,23 @@ func (r *Registry) candidates(ctx context.Context, model string, auto bool, opts
 	return out, nil
 }
 
+func (r *Registry) providerOpenCircuit(ctx context.Context, providerName string) bool {
+	if r.store == nil || r.opts.CircuitErrors <= 0 {
+		return false
+	}
+	h, ok, err := r.store.GetProviderHealth(ctx, providerName)
+	if err != nil || !ok {
+		return false
+	}
+	if h.ConsecutiveErrors < r.opts.CircuitErrors {
+		return false
+	}
+	if h.LastErrorAt == nil {
+		return true
+	}
+	return time.Since(*h.LastErrorAt) < r.opts.CircuitCooldown
+}
+
 func isRoutable(m Model) bool {
 	if m.Quota == nil {
 		return true
@@ -387,6 +566,9 @@ func isRoutable(m Model) bool {
 		return false
 	}
 	if m.Quota.RemainingRPM != nil && *m.Quota.RemainingRPM <= 0 {
+		return false
+	}
+	if m.Quota.RemainingTPM != nil && *m.Quota.RemainingTPM <= 0 {
 		return false
 	}
 	return true

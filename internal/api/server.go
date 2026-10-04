@@ -17,21 +17,27 @@ type Server struct {
 	store       *store.Store
 	mux         *http.ServeMux
 	openAPIPath string
+	apiKey      string
 }
 
 func NewServer(registry *provider.Registry, st *store.Store, openAPIPath string) *Server {
+	return NewServerWithAuth(registry, st, openAPIPath, "")
+}
+
+func NewServerWithAuth(registry *provider.Registry, st *store.Store, openAPIPath, apiKey string) *Server {
 	s := &Server{
 		registry:    registry,
 		store:       st,
 		mux:         http.NewServeMux(),
 		openAPIPath: openAPIPath,
+		apiKey:      strings.TrimSpace(apiKey),
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return withRequestContext(s.mux)
+	return withRequestContext(withAPIKey(s.apiKey, s.mux))
 }
 
 func (s *Server) routes() {
@@ -167,26 +173,43 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 		status = http.StatusBadGateway
 	}
 
-	ev := store.UsageEvent{
-		TS:         time.Now().UTC(),
-		Provider:   result.Provider,
-		Model:      result.Model,
-		PoolID:     provider.ResolvePoolID(result.Provider, result.Model),
-		StatusCode: status,
-		LatencyMS:  latency,
-		RequestID:  logging.RequestID(ctx),
-	}
-	if err != nil {
-		ev.ErrorType = classifyError(status, err)
-	} else {
-		upstreamID := fillUsageFromResponse(result.Body, &ev)
-		if upstreamID != "" {
-			logging.Debugf(ctx, "upstream_response", "upstream_id", upstreamID, "provider", result.Provider, "model", result.Model)
+	reqID := logging.RequestID(ctx)
+	if len(result.Attempted) > 0 {
+		for i, a := range result.Attempted {
+			ev := store.UsageEvent{
+				TS:         time.Now().UTC(),
+				Provider:   a.Provider,
+				Model:      a.Model,
+				PoolID:     provider.ResolvePoolID(a.Provider, a.Model),
+				StatusCode: a.Status,
+				LatencyMS:  a.LatencyMS,
+				RequestID:  reqID,
+				ErrorType:  a.ErrorType,
+			}
+			if a.Status >= 200 && a.Status < 300 {
+				upstreamID := fillUsageFromResponse(a.Body, &ev)
+				if upstreamID != "" && i == len(result.Attempted)-1 {
+					logging.Debugf(ctx, "upstream_response", "upstream_id", upstreamID, "provider", a.Provider, "model", a.Model)
+				}
+			}
+			if s.store != nil && a.Provider != "" {
+				if recErr := s.store.RecordUsage(ctx, ev); recErr != nil {
+					logging.Errorf(ctx, "store_record_usage_failed", "err", recErr.Error(), "attempt", i+1)
+				}
+			}
 		}
-	}
-	if s.store != nil && result.Provider != "" {
-		if recErr := s.store.RecordUsage(ctx, ev); recErr != nil {
-			logging.Errorf(ctx, "store_record_usage_failed", "err", recErr.Error())
+	} else if result.Provider != "" {
+		// Rare path: failed before any upstream attempt.
+		ev := store.UsageEvent{
+			TS: time.Now().UTC(), Provider: result.Provider, Model: result.Model,
+			PoolID: provider.ResolvePoolID(result.Provider, result.Model),
+			StatusCode: status, LatencyMS: latency, RequestID: reqID,
+		}
+		if err != nil {
+			ev.ErrorType = classifyError(status, err)
+		}
+		if s.store != nil {
+			_ = s.store.RecordUsage(ctx, ev)
 		}
 	}
 
@@ -222,13 +245,19 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 		return
 	}
 
+	var tokens int64
+	{
+		var tmp store.UsageEvent
+		_ = fillUsageFromResponse(result.Body, &tmp)
+		tokens = tmp.TotalTokens
+	}
 	logging.Infof(ctx, "chat_done",
 		"status", status,
 		"provider", result.Provider,
 		"model", result.Model,
 		"attempts", result.Attempts,
 		"latency_ms", latency,
-		"tokens", ev.TotalTokens,
+		"tokens", tokens,
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

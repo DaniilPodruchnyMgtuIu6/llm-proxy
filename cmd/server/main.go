@@ -21,7 +21,13 @@ func main() {
 		os.Exit(1)
 	}
 	logging.Configure(cfg.LogLevel)
-	logging.Info("startup", "log_level", cfg.LogLevel)
+	logging.Info("startup",
+		"log_level", cfg.LogLevel,
+		"upstream_timeout", cfg.UpstreamTimeout.String(),
+		"max_fallback_attempts", cfg.MaxFallbackAttempts,
+		"models_cache_ttl", cfg.ModelsCacheTTL.String(),
+		"proxy_auth", cfg.ProxyAPIKey != "",
+	)
 
 	st, err := store.Open(cfg.DatabaseURL)
 	if err != nil {
@@ -50,8 +56,15 @@ func main() {
 		logging.Info("provider_enabled", "provider", "openrouter")
 	}
 
-	registry := provider.NewRegistry(st, providers...)
-	srv := api.NewServer(registry, st, cfg.OpenAPIPath)
+	regOpts := provider.Options{
+		UpstreamTimeout: cfg.UpstreamTimeout,
+		MaxAttempts:     cfg.MaxFallbackAttempts,
+		ModelsCacheTTL:  cfg.ModelsCacheTTL,
+		CircuitErrors:   cfg.CircuitErrors,
+		CircuitCooldown: cfg.CircuitCooldown,
+	}
+	registry := provider.NewRegistryWithOptions(st, regOpts, providers...)
+	srv := api.NewServerWithAuth(registry, st, cfg.OpenAPIPath, cfg.ProxyAPIKey)
 	logging.Info("listening", "addr", cfg.Addr, "docs", "/docs")
 	if err := http.ListenAndServe(cfg.Addr, srv.Handler()); err != nil {
 		logging.Error("server_failed", "err", err.Error())
