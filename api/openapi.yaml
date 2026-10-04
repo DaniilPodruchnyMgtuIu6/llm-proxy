@@ -1,19 +1,20 @@
 openapi: 3.0.3
 info:
   title: LLM Proxy API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     HTTP-прокси над бесплатными LLM-источниками (Gemini, Groq, OpenRouter).
 
     ## Для основной системы
     1. `GET /v1/providers` — здоровье источников и квоты пулов  
     2. `GET /v1/models` — модели уже отсортированы: `rank=1` самая сильная  
-    3. Идти по списку, учитывая `quota.remaining_rpd`  
-    4. `POST /v1/chat/completions`  
+    3. `POST /v1/route` или `POST /v1/chat/completions` с `model:"auto"` — прокси сам выберет модель  
+    4. Либо явный `model` — при 429/5xx прокси сделает fallback на следующий кандидат  
     5. `GET /v1/stats/summary` — статистика из PostgreSQL  
 
     ## Квоты
     - `quota.source=live` — live remaining (OpenRouter)  
+    - `quota.source=live_headers` — RPM/TPM из upstream rate-limit headers  
     - `quota.source=local_db` — остаток из PostgreSQL (успешные запросы за день)  
     - `quota.source=static_catalog` — только потолок из каталога  
     - `scope=shared_pool` + `pool_id` — общий дневной бюджет на группу моделей  
@@ -166,8 +167,11 @@ paths:
       tags: [inference]
       summary: Chat completions (OpenAI-compatible)
       description: |
-        Проксирует запрос в backend, выбранный по `model` id.
-        Успешные и ошибочные вызовы пишутся в SQLite (`usage_events`, `daily_counters`).
+        Проксирует запрос в backend по `model`.
+        `model: "auto"` — выбор лучшей доступной модели (rank + remaining).
+        При 429/502/503/504 — auto-fallback на следующий кандидат.
+        Ответные заголовки: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`.
+        Usage и rate-limit headers пишутся в PostgreSQL.
       operationId: chatCompletions
       requestBody:
         required: true
@@ -176,6 +180,12 @@ paths:
             schema:
               $ref: "#/components/schemas/ChatCompletionRequest"
             examples:
+              auto:
+                value:
+                  model: auto
+                  messages:
+                    - role: user
+                      content: ping
               gemini:
                 value:
                   model: gemini-3.5-flash-lite
@@ -197,6 +207,13 @@ paths:
       responses:
         "200":
           description: Upstream chat completion
+          headers:
+            X-LLM-Proxy-Model:
+              schema: { type: string }
+            X-LLM-Proxy-Provider:
+              schema: { type: string }
+            X-LLM-Proxy-Attempts:
+              schema: { type: integer }
           content:
             application/json:
               schema:
@@ -212,6 +229,46 @@ paths:
               schema:
                 $ref: "#/components/schemas/UpstreamError"
         "502":
+          $ref: "#/components/responses/ProxyError"
+        "503":
+          $ref: "#/components/responses/ProxyError"
+
+  /v1/route:
+    post:
+      tags: [inference]
+      summary: Auto-route chat to best available model
+      description: |
+        То же что chat с `model:auto`, плюс фильтры выбора кандидатов.
+        Proxy fields (`provider`, `recommended_only`, `exclude_models`) не уходят upstream.
+      operationId: routeChat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RouteRequest"
+            example:
+              messages:
+                - role: user
+                  content: ping
+              recommended_only: true
+      responses:
+        "200":
+          description: Upstream chat completion from chosen model
+          headers:
+            X-LLM-Proxy-Model:
+              schema: { type: string }
+            X-LLM-Proxy-Provider:
+              schema: { type: string }
+            X-LLM-Proxy-Attempts:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+        "400":
+          $ref: "#/components/responses/ProxyError"
+        "503":
           $ref: "#/components/responses/ProxyError"
 
   /v1/stats/summary:
@@ -284,6 +341,9 @@ components:
         remaining_rpm:
           type: integer
           nullable: true
+        remaining_tpm:
+          type: integer
+          nullable: true
         remaining_rpd:
           type: integer
           nullable: true
@@ -306,8 +366,8 @@ components:
           example: openrouter:free
         source:
           type: string
-          enum: [live, local_db, static_catalog, unknown]
-          description: live=OpenRouter /key; local_db=PostgreSQL counters; static_catalog=только потолок
+          enum: [live, live_headers, local_db, static_catalog, unknown]
+          description: live=OpenRouter /key; live_headers=RPM/TPM headers; local_db=PostgreSQL counters; static_catalog=только потолок
         confidence:
           type: string
           enum: [exact, estimate, unknown]
@@ -418,7 +478,7 @@ components:
       properties:
         model:
           type: string
-          description: ID из GET /v1/models
+          description: ID из GET /v1/models, либо `auto` для выбора прокси
         messages:
           type: array
           items:
@@ -430,6 +490,28 @@ components:
         stream:
           type: boolean
           description: Streaming пока не гарантируется прокси
+
+    RouteRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        provider:
+          type: string
+          description: Ограничить кандидатов источником
+        recommended_only:
+          type: boolean
+        exclude_models:
+          type: array
+          items:
+            type: string
+        temperature:
+          type: number
+        max_tokens:
+          type: integer
 
     ChatCompletionResponse:
       type: object

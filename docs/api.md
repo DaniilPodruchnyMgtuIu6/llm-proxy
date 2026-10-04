@@ -17,7 +17,8 @@
 | `GET` | `/v1/providers` | источники + их квоты/здоровье |
 | `GET` | `/v1/models` | модели с `source` + `quota` + `quality_score`/`rank` (лучшие первые) |
 | `GET` | `/v1/stats/summary` | агрегаты из PostgreSQL |
-| `POST` | `/v1/chat/completions` | OpenAI-совместимый чат |
+| `POST` | `/v1/chat/completions` | OpenAI-чат; `model:"auto"` + fallback 429/5xx |
+| `POST` | `/v1/route` | авто-выбор модели (фильтры `provider` / `recommended_only`) |
 ## GET `/v1/providers`
 
 Обзор источников для дашборда / роутера.
@@ -112,21 +113,22 @@ curl "http://localhost:8080/v1/models?provider=groq&free=true"
 | `used_rpd` | уже потрачено за день (если есть) |
 | `scope` | `per_model` — свой счётчик; `shared_pool` — общий на группу |
 | `pool_id` | id пула, напр. `openrouter:free` — модели с одним pool_id делят RPD |
-| `source` | `live` / `static_catalog` / `unknown` |
+| `source` | `live` / `live_headers` / `local_db` / `static_catalog` / `unknown` |
 | `confidence` | `exact` / `estimate` / `unknown` |
 | `reset_rpd_hint` | `midnight_utc` / `midnight_pacific` / `sliding_window` |
 | `resets_at` | RFC3339 следующего сброса RPD, если считаем |
+| `remaining_tpm` | остаток TPM из rate-limit headers (если есть) |
 
 ### Что live / local_db / estimate
 
 | Источник | Лимиты | Remaining |
 |----------|--------|-----------|
 | OpenRouter free | live RPD из `/api/v1/key` | **live** (`remaining_rpd`) |
-| Groq | каталог Free Plan | **local_db** = `rpd - success_today` |
+| Groq | каталог Free Plan + headers | **local_db** RPD + **live_headers** RPM/TPM |
 | Gemini | оценка Free Tier | **local_db** (estimate ceiling) |
 
 БД: PostgreSQL (`DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` / `DB_SSLMODE`, см. `docker-compose.yml` + pgAdmin `:5050`).  
-Таблицы: `usage_events`, `daily_counters`, `provider_health`.
+Таблицы: `usage_events`, `daily_counters`, `provider_health`, `rate_limits`, `schema_migrations`.
 
 ## GET `/v1/stats/summary`
 
@@ -138,12 +140,26 @@ curl "http://localhost:8080/v1/stats/summary?from=2026-09-28&to=2026-10-04&provi
 
 ## Рекомендуемая логика роутера (основная система)
 
+Простой путь — отдать выбор прокси:
+
+```bash
+curl -s http://localhost:8080/v1/route -H "Content-Type: application/json" -d "{\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"recommended_only\":true}"
+```
+
+Или вручную:
+
 1. `GET /v1/providers` — отбросить `healthy=false`.
 2. `GET /v1/models?recommended=true` — уже отсортировано по «мозгам» (`rank`).
-3. Идти сверху вниз, пропуская `remaining_rpd == 0`.
+3. Идти сверху вниз, пропуская `remaining_rpd == 0` / `remaining_rpm == 0`.
 4. Для `scope=shared_pool` не суммировать RPD по моделям — один `pool_id` = один бюджет.
-5. При `429` — следующий кандидат / другой `provider`.
+5. При `429` — следующий кандидат (прокси сделает это сам).
 
 ## POST `/v1/chat/completions`
 
-Без изменений: OpenAI-тело, `model` = id из `/v1/models`.
+OpenAI-тело. `model` = id из `/v1/models` **или** `"auto"`.  
+При 429/502/503/504 — fallback на следующий кандидат по `rank`.  
+Заголовки ответа: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`.
+
+## POST `/v1/route`
+
+Тело как chat + опционально `provider`, `recommended_only`, `exclude_models` (не уходят upstream). `model` принудительно `auto`.

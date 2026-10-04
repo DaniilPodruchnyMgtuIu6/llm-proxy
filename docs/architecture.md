@@ -13,8 +13,8 @@
 Прокси агрегирует бесплатные LLM-источники (Gemini, Groq, OpenRouter) за единым OpenAI-совместимым API. Основная система:
 
 1. смотрит `/v1/providers` и `/v1/models` (уже отсортированы по «мозгам»);
-2. выбирает модель с учётом `rank`, `quality_score`, `quota.remaining_rpd`;
-3. шлёт `/v1/chat/completions`;
+2. либо шлёт `POST /v1/route` / `model:"auto"` — прокси сам выбирает кандидата;
+3. либо явный `model` в `/v1/chat/completions` (при 429/5xx — fallback);
 4. при необходимости смотрит `/v1/stats/summary`.
 
 ```mermaid
@@ -32,11 +32,11 @@ flowchart LR
 | Компонент | Путь / сервис | Роль |
 |-----------|---------------|------|
 | HTTP API | `internal/api` | ручки, Swagger, запись usage |
-| Registry | `internal/provider` | агрегация моделей, роутинг chat по `model` |
+| Registry | `internal/provider` | агрегация, auto-route, fallback 429/5xx |
 | Providers | `internal/provider/{gemini,groq,openrouter}` | upstream OpenAI-compat клиенты |
 | Quota catalog | `internal/quota` | статические лимиты Free Tier |
 | Ranking | `internal/ranking` | `quality_score` (выше = умнее) |
-| Store | `internal/store` | PostgreSQL: events, counters, health |
+| Store | `internal/store` | PostgreSQL: events, counters, health, rate_limits, migrations |
 | Postgres | `docker-compose` service `postgres` | persistence |
 | pgAdmin | `docker-compose` service `pgadmin` | UI БД |
 
@@ -94,7 +94,7 @@ sequenceDiagram
   A-->>C: JSON
 ```
 
-## 4. Data flow: chat completions
+## 4. Data flow: chat / route / fallback
 
 ```mermaid
 sequenceDiagram
@@ -104,14 +104,22 @@ sequenceDiagram
   participant U as Upstream
   participant S as Postgres
 
-  C->>A: POST /v1/chat/completions
-  A->>R: ChatCompletions
-  R->>R: resolve provider by model
-  R->>U: forward request
-  U-->>R: response or error
-  R-->>A: body status provider model
+  C->>A: POST /v1/chat/completions or /v1/route
+  A->>R: ChatCompletions opts
+  R->>R: candidates by rank remaining
+  loop each candidate until 2xx
+    R->>U: forward with model rewrite
+    U-->>R: body status headers
+    R->>S: UpsertRateLimit if headers
+    alt 429 or 5xx
+      R->>R: next candidate
+    else other 4xx
+      R-->>A: stop
+    end
+  end
+  R-->>A: ChatResult
   A->>S: RecordUsage
-  A-->>C: JSON response
+  A-->>C: JSON plus X-LLM-Proxy headers
 ```
 
 ## 5. Алгоритм ранжирования моделей
