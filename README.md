@@ -2,89 +2,87 @@
 
 HTTP-прокси для работы с разными LLM через единый OpenAI-совместимый API. Цель — агрегировать **бесплатные** источники моделей (лимиты на день/неделю) и прозрачно маршрутизировать запросы.
 
-## Идея
+## Документация
 
-Многие провайдеры дают бесплатный доступ к моделям с квотами (RPM / TPM / RPD). Вместо ручного переключения между ними прокси:
-
-1. держит список доступных моделей и источников;
-2. принимает запрос клиента в едином формате;
-3. выбирает подходящий бэкенд и проксирует вызов;
-4. возвращает ответ в едином формате.
+| Документ | Содержание |
+|----------|------------|
+| [`docs/architecture.md`](./docs/architecture.md) | Архитектура, алгоритмы квот/ранжирования, Mermaid |
+| [`docs/api.md`](./docs/api.md) | Контракт для основной системы |
+| [`docs/providers/`](./docs/providers/) | Карточки Gemini / Groq / OpenRouter |
+| [/docs](http://localhost:8080/docs) | Swagger UI |
+| [`TODO/`](./TODO/) | SDD-планы изменений |
+| [`AGENTS.md`](./AGENTS.md) | Правила для AI-агента (без самовольного push) |
 
 ## API
-
-- Контракт: **[`docs/api.md`](./docs/api.md)**
-- Swagger UI: **[/docs](http://localhost:8080/docs)** (`/openapi.yaml`)
-- Планы изменений (SDD): **[`TODO/`](./TODO/)**
 
 | Метод | Путь | Назначение |
 |-------|------|------------|
 | `GET` | `/docs` | Swagger UI |
-| `GET` | `/openapi.yaml` | OpenAPI 3 спецификация |
+| `GET` | `/openapi.yaml` | OpenAPI 3 |
 | `GET` | `/healthz` | Healthcheck |
-| `GET` | `/v1/providers` | Источники + квоты/здоровье |
-| `GET` | `/v1/models` | Модели с `source` + `quota` |
-| `GET` | `/v1/stats/summary` | Статистика из SQLite |
-| `POST` | `/v1/chat/completions` | Чат (OpenAI-совместимое тело) |
-
-Пример:
+| `GET` | `/v1/providers` | Источники + квоты |
+| `GET` | `/v1/models` | Модели: `source`, `quota`, `quality_score`, `rank` (лучшие первые) |
+| `GET` | `/v1/stats/summary` | Статистика из PostgreSQL |
+| `POST` | `/v1/chat/completions` | Чат |
 
 ```bash
-curl http://localhost:8080/v1/providers
 curl "http://localhost:8080/v1/models?recommended=true"
-curl "http://localhost:8080/v1/stats/summary"
-
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemini-3.5-flash-lite",
-    "messages": [{"role":"user","content":"ping"}]
-  }'
+# data[0] — самая «мозговая» из выдачи (rank=1)
 ```
 
 ## Провайдеры
 
-Карточки с лимитами, моделями и способом доступа — в **[`docs/providers/`](./docs/providers/)**.
+| Провайдер | Документация | Env |
+|-----------|--------------|-----|
+| Google Gemini | [gemini.md](./docs/providers/gemini.md) | `GEMINI_API_KEY` |
+| Groq | [groq.md](./docs/providers/groq.md) | `GROQ_API_KEY` |
+| OpenRouter | [openrouter.md](./docs/providers/openrouter.md) | `OPENROUTER_API_KEY` |
 
-| Провайдер | Статус | Документация | Env |
-|-----------|--------|--------------|-----|
-| Google Gemini (AI Studio) | подключено | [docs/providers/gemini.md](./docs/providers/gemini.md) | `GEMINI_API_KEY` |
-| Groq (GroqCloud) | подключено | [docs/providers/groq.md](./docs/providers/groq.md) | `GROQ_API_KEY` |
-| OpenRouter | подключено | [docs/providers/openrouter.md](./docs/providers/openrouter.md) | `OPENROUTER_API_KEY` |
+## Инфраструктура
 
-Новый источник: копируй [`docs/providers/_TEMPLATE.md`](./docs/providers/_TEMPLATE.md) → заполни → подключаем код.
+```bash
+docker compose up -d
+```
+
+| Сервис | URL / порт |
+|--------|------------|
+| Postgres | `localhost:5432` (user/pass/db: `llmproxy`) |
+| pgAdmin | http://localhost:5050 (`admin@llm-proxy.local` / `admin`) |
+| Proxy | http://localhost:8080 |
+
+В pgAdmin: Add Server → Host `postgres` (из контейнера) или `host.docker.internal`/`localhost` с хоста, User/Password/DB `llmproxy`.
 
 ## Конфиг
 
+См. [`.env.example`](./.env.example).
+
 ```env
-GEMINI_API_KEY=your_key_here
-GROQ_API_KEY=your_key_here
-OPENROUTER_API_KEY=your_key_here
 ADDR=:8080
-DATABASE_PATH=data/llm-proxy.db
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=llmproxy
+DB_PASSWORD=llmproxy
+DB_NAME=llmproxy
+DB_SSLMODE=disable
+GEMINI_API_KEY=...
+GROQ_API_KEY=...
+OPENROUTER_API_KEY=...
 ```
-
-## Стек
-
-- Go (`cmd/server`)
-- SQLite (`modernc.org/sqlite`) — квоты + статистика
-- Провайдеры: `internal/provider/<name>`
-- OpenAPI: `api/openapi.yaml`
 
 ## Запуск
 
 ```bash
+docker compose up -d
 go run ./cmd/server
 ```
 
+## Стек
+
+- Go · PostgreSQL (`pgx`) · Docker Compose · OpenAPI/Swagger
+
 ## Статус
 
-- [x] Идея зафиксирована
-- [x] Проект инициализирован
-- [x] Gemini (AI Studio) — list models + chat completions
-- [x] Groq — list models + chat completions
-- [x] OpenRouter — free models + chat completions
-- [x] Обогащённый `/v1/models` + `/v1/providers` (source/quota)
-- [x] Swagger UI `/docs` + OpenAPI
-- [x] SQLite: usage events, daily counters, stats API
+- [x] Multi-provider proxy (Gemini, Groq, OpenRouter)
+- [x] Quotas + ranking + PostgreSQL stats
+- [x] Swagger + architecture docs (Mermaid)
 - [ ] Auto-fallback при 429

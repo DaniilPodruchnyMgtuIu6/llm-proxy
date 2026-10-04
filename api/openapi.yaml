@@ -1,23 +1,28 @@
 openapi: 3.0.3
 info:
   title: LLM Proxy API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     HTTP-прокси над бесплатными LLM-источниками (Gemini, Groq, OpenRouter).
 
     ## Для основной системы
     1. `GET /v1/providers` — здоровье источников и квоты пулов  
-    2. `GET /v1/models` — модели с `source` + `quota` (фильтры ниже)  
-    3. Выбрать кандидата по `remaining_rpd` / `recommended`  
+    2. `GET /v1/models` — модели уже отсортированы: `rank=1` самая сильная  
+    3. Идти по списку, учитывая `quota.remaining_rpd`  
     4. `POST /v1/chat/completions`  
-    5. `GET /v1/stats/summary` — операционная статистика из SQLite  
+    5. `GET /v1/stats/summary` — статистика из PostgreSQL  
 
     ## Квоты
     - `quota.source=live` — live remaining (OpenRouter)  
-    - `quota.source=local_db` — остаток из локальной БД (успешные запросы за день)  
+    - `quota.source=local_db` — остаток из PostgreSQL (успешные запросы за день)  
     - `quota.source=static_catalog` — только потолок из каталога  
     - `scope=shared_pool` + `pool_id` — общий дневной бюджет на группу моделей  
 
+    ## Ранжирование
+    - `quality_score` — эвристика «мозгов» (выше = лучше)  
+    - `rank` — позиция после сортировки  
+
+    Архитектура: `docs/architecture.md`  
     Интерактивная документация: [/docs](/docs)
   contact:
     name: llm-proxy
@@ -95,9 +100,10 @@ paths:
   /v1/models:
     get:
       tags: [catalog]
-      summary: Список моделей с source и quota
+      summary: Список моделей с source, quota и ranking
       description: |
-        OpenAI-совместимый список, расширенный полями для роутинга в основной системе.
+        OpenAI-совместимый список, расширенный полями для роутинга.
+        Результат отсортирован по `quality_score` DESC (`rank=1` — лучшая модель в выдаче).
       operationId: listModels
       parameters:
         - name: provider
@@ -182,7 +188,7 @@ paths:
   /v1/stats/summary:
     get:
       tags: [stats]
-      summary: Агрегированная статистика из SQLite
+      summary: Агрегированная статистика из PostgreSQL
       description: |
         Для поддержки и дашбордов основной системы: успехи, ошибки, 429, токены.
         По умолчанию окно — последние 7 UTC-дней.
@@ -272,6 +278,7 @@ components:
         source:
           type: string
           enum: [live, local_db, static_catalog, unknown]
+          description: live=OpenRouter /key; local_db=PostgreSQL counters; static_catalog=только потолок
         confidence:
           type: string
           enum: [exact, estimate, unknown]
@@ -307,6 +314,14 @@ components:
         recommended:
           type: boolean
           description: Рекомендована для free-роутинга
+        quality_score:
+          type: integer
+          description: Эвристика качества/«мозгов» (выше = предпочтительнее)
+          example: 7400
+        rank:
+          type: integer
+          description: Позиция после сортировки (1 = лучшая в текущей выдаче)
+          example: 1
         quota:
           $ref: "#/components/schemas/Quota"
 

@@ -2,9 +2,10 @@
 
 База: `http://localhost:8080`
 
-Интерактивно: [/docs](http://localhost:8080/docs) · спека: [/openapi.yaml](http://localhost:8080/openapi.yaml)
+Интерактивно: [/docs](http://localhost:8080/docs) · спека: [/openapi.yaml](http://localhost:8080/openapi.yaml)  
+Архитектура и алгоритмы (Mermaid): [`architecture.md`](./architecture.md)
 
-Цель: основная система может **выбирать модель и источник**, зная лимиты и остаток запросов, плюс смотреть статистику поддержки.
+Цель: основная система может **выбирать модель и источник**, зная лимиты, остаток запросов и **качество модели** (`rank` / `quality_score`), плюс смотреть статистику поддержки.
 
 ## Эндпоинты
 
@@ -14,8 +15,8 @@
 | `GET` | `/openapi.yaml` | OpenAPI 3 |
 | `GET` | `/healthz` | liveness |
 | `GET` | `/v1/providers` | источники + их квоты/здоровье |
-| `GET` | `/v1/models` | модели с `source` + `quota` |
-| `GET` | `/v1/stats/summary` | агрегаты из SQLite |
+| `GET` | `/v1/models` | модели с `source` + `quota` + `quality_score`/`rank` (лучшие первые) |
+| `GET` | `/v1/stats/summary` | агрегаты из PostgreSQL |
 | `POST` | `/v1/chat/completions` | OpenAI-совместимый чат |
 ## GET `/v1/providers`
 
@@ -81,15 +82,17 @@ curl "http://localhost:8080/v1/models?provider=groq&free=true"
   "source": { "id": "groq", "name": "Groq (GroqCloud)" },
   "free": true,
   "recommended": true,
+  "quality_score": 7400,
+  "rank": 3,
   "quota": {
     "rpm": 30,
     "rpd": 1000,
     "tpm": 8000,
     "tpd": 200000,
     "remaining_rpm": null,
-    "remaining_rpd": null,
+    "remaining_rpd": 999,
     "scope": "per_model",
-    "source": "static_catalog",
+    "source": "local_db",
     "confidence": "exact",
     "tier": "free",
     "reset_rpd_hint": "sliding_window",
@@ -97,6 +100,8 @@ curl "http://localhost:8080/v1/models?provider=groq&free=true"
   }
 }
 ```
+
+Список **уже отсортирован**: `rank=1` — самая сильная модель в текущей выдаче. Алгоритм: [`architecture.md` §5](./architecture.md).
 
 ### Поля `quota` (как читать в основной системе)
 
@@ -120,7 +125,7 @@ curl "http://localhost:8080/v1/models?provider=groq&free=true"
 | Groq | каталог Free Plan | **local_db** = `rpd - success_today` |
 | Gemini | оценка Free Tier | **local_db** (estimate ceiling) |
 
-Локальная БД: `DATABASE_PATH` (default `data/llm-proxy.db`).  
+БД: PostgreSQL (`DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` / `DB_SSLMODE`, см. `docker-compose.yml` + pgAdmin `:5050`).  
 Таблицы: `usage_events`, `daily_counters`, `provider_health`.
 
 ## GET `/v1/stats/summary`
@@ -134,10 +139,8 @@ curl "http://localhost:8080/v1/stats/summary?from=2026-09-28&to=2026-10-04&provi
 ## Рекомендуемая логика роутера (основная система)
 
 1. `GET /v1/providers` — отбросить `healthy=false`.
-2. `GET /v1/models?free=true&recommended=true` — кандидаты.
-3. Сортировать по:
-   - `quota.remaining_rpd` (если не null) desc
-   - иначе `quota.rpd` / `confidence`
+2. `GET /v1/models?recommended=true` — уже отсортировано по «мозгам» (`rank`).
+3. Идти сверху вниз, пропуская `remaining_rpd == 0`.
 4. Для `scope=shared_pool` не суммировать RPD по моделям — один `pool_id` = один бюджет.
 5. При `429` — следующий кандидат / другой `provider`.
 
