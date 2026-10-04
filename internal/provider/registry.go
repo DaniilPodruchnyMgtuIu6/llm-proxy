@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/llm-proxy/llm-proxy/internal/ranking"
 	"github.com/llm-proxy/llm-proxy/internal/store"
 )
 
@@ -34,13 +36,18 @@ func (r *Registry) ListModels(ctx context.Context, filter ListFilter) (ModelsRes
 	r.byModel = make(map[string]Provider)
 	out := ModelsResponse{Object: "list", Data: make([]Model, 0)}
 
+	var firstErr error
 	for _, p := range r.providers {
 		models, err := p.ListModels(ctx)
 		if err != nil {
-			return ModelsResponse{}, fmt.Errorf("%s: list models: %w", p.Name(), err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: list models: %w", p.Name(), err)
+			}
+			continue
 		}
 		for _, m := range models {
 			r.byModel[m.ID] = p
+			m.QualityScore = ranking.Score(m.Provider, m.ID)
 			r.applyLocalQuota(ctx, &m)
 			if filter.Provider != "" && !strings.EqualFold(filter.Provider, p.Name()) {
 				continue
@@ -54,6 +61,19 @@ func (r *Registry) ListModels(ctx context.Context, filter ListFilter) (ModelsRes
 			out.Data = append(out.Data, m)
 		}
 	}
+	if len(out.Data) == 0 && firstErr != nil {
+		return ModelsResponse{}, firstErr
+	}
+
+	sort.SliceStable(out.Data, func(i, j int) bool {
+		if out.Data[i].QualityScore != out.Data[j].QualityScore {
+			return out.Data[i].QualityScore > out.Data[j].QualityScore
+		}
+		return out.Data[i].ID < out.Data[j].ID
+	})
+	for i := range out.Data {
+		out.Data[i].Rank = i + 1
+	}
 
 	return out, nil
 }
@@ -62,7 +82,6 @@ func (r *Registry) applyLocalQuota(ctx context.Context, m *Model) {
 	if m.Quota == nil || r.store == nil {
 		return
 	}
-	// Prefer upstream live remaining (OpenRouter).
 	if m.Quota.Source == "live" && m.Quota.RemainingRPD != nil {
 		return
 	}

@@ -42,15 +42,17 @@ type Quota struct {
 
 // Model is an OpenAI-compatible model entry enriched for the main system.
 type Model struct {
-	ID          string  `json:"id"`
-	Object      string  `json:"object"`
-	Created     int64   `json:"created,omitempty"`
-	OwnedBy     string  `json:"owned_by"`
-	Provider    string  `json:"provider"`
-	Source      Source  `json:"source"`
-	Free        bool    `json:"free"`
-	Recommended bool    `json:"recommended,omitempty"`
-	Quota       *Quota  `json:"quota"`
+	ID           string `json:"id"`
+	Object       string `json:"object"`
+	Created      int64  `json:"created,omitempty"`
+	OwnedBy      string `json:"owned_by"`
+	Provider     string `json:"provider"`
+	Source       Source `json:"source"`
+	Free         bool   `json:"free"`
+	Recommended  bool   `json:"recommended,omitempty"`
+	QualityScore int    `json:"quality_score"`
+	Rank         int    `json:"rank,omitempty"`
+	Quota        *Quota `json:"quota"`
 }
 
 // ModelsResponse is returned by GET /v1/models.
