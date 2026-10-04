@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/llm-proxy/llm-proxy/internal/logging"
 	"github.com/llm-proxy/llm-proxy/internal/ranking"
 	"github.com/llm-proxy/llm-proxy/internal/store"
 )
@@ -219,21 +220,29 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 
 	model := strings.TrimSpace(req.Model)
 	auto := model == "" || strings.EqualFold(model, "auto")
+	requested := model
+	if auto {
+		requested = "auto"
+	}
 
 	candidates, err := r.candidates(ctx, model, auto, opts)
 	if err != nil {
+		logging.Errorf(ctx, "route_candidates_failed", "requested", requested, "err", err.Error())
 		return ChatResult{Status: 502}, err
 	}
 	if len(candidates) == 0 {
+		logging.Infof(ctx, "route_no_candidates", "requested", requested)
 		if auto {
 			return ChatResult{Status: 503}, fmt.Errorf("no available models for routing")
 		}
 		return ChatResult{Status: 404}, fmt.Errorf("model not found: %s", model)
 	}
 
+	logging.Debugf(ctx, "route_start", "requested", requested, "candidates", len(candidates))
+
 	var last ChatResult
 	var lastErr error
-	for _, c := range candidates {
+	for i, c := range candidates {
 		r.mu.RLock()
 		p, ok := r.byModel[c.ID]
 		r.mu.RUnlock()
@@ -245,17 +254,21 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 		if err != nil {
 			last = ChatResult{Status: 400, Provider: c.Provider, Model: c.ID}
 			lastErr = err
+			logging.Debugf(ctx, "route_attempt_prepare_failed", "provider", c.Provider, "model", c.ID, "err", err.Error())
 			continue
 		}
 		attemptBody, err = SanitizeChatBody(p.Name(), attemptBody)
 		if err != nil {
 			last = ChatResult{Status: 400, Provider: c.Provider, Model: c.ID}
 			lastErr = err
+			logging.Debugf(ctx, "route_attempt_sanitize_failed", "provider", p.Name(), "model", c.ID, "err", err.Error())
 			continue
 		}
 
+		attemptStart := time.Now()
 		resp, status, hdr, err := p.ChatCompletions(ctx, attemptBody)
 		r.persistRateLimits(ctx, p.Name(), c.ID, hdr)
+		attemptMS := time.Since(attemptStart).Milliseconds()
 
 		tried := append(last.Tried, p.Name()+"/"+c.ID)
 		result := ChatResult{
@@ -270,13 +283,29 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 		last = result
 		lastErr = err
 
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		upstreamID := peekUpstreamID(resp)
+		logging.Debugf(ctx, "route_attempt",
+			"n", i+1,
+			"provider", p.Name(),
+			"model", c.ID,
+			"status", status,
+			"latency_ms", attemptMS,
+			"upstream_id", upstreamID,
+			"err", errStr,
+		)
+
 		if err == nil && status >= 200 && status < 300 {
 			return result, nil
 		}
 		if !isRetryableStatus(status) {
+			logging.Infof(ctx, "route_stop_non_retryable", "provider", p.Name(), "model", c.ID, "status", status)
 			return result, err
 		}
-		// retryable: continue to next candidate
+		logging.Infof(ctx, "route_fallback", "from", p.Name()+"/"+c.ID, "status", status)
 	}
 
 	if last.Status == 0 {
@@ -384,6 +413,19 @@ func (r *Registry) persistRateLimits(ctx context.Context, providerName, modelID 
 	rl.Provider = providerName
 	rl.Model = modelID
 	_ = r.store.UpsertRateLimit(ctx, rl)
+}
+
+func peekUpstreamID(body json.RawMessage) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var parsed struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ""
+	}
+	return parsed.ID
 }
 
 func setModel(body json.RawMessage, model string) (json.RawMessage, error) {

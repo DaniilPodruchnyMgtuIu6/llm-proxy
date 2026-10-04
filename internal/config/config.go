@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	Addr              string
+	LogLevel          string
 	DBHost            string
 	DBPort            string
 	DBUser            string
@@ -34,6 +35,7 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		Addr:              envOr("ADDR", ":8080"),
+		LogLevel:          envOr("LOG_LEVEL", "info"),
 		DBHost:            envOr("DB_HOST", "localhost"),
 		DBPort:            envOr("DB_PORT", "5432"),
 		DBUser:            envOr("DB_USER", "llmproxy"),

@@ -1,11 +1,12 @@
 ﻿package main
 
 import (
-	"log"
 	"net/http"
+	"os"
 
 	"github.com/llm-proxy/llm-proxy/internal/api"
 	"github.com/llm-proxy/llm-proxy/internal/config"
+	"github.com/llm-proxy/llm-proxy/internal/logging"
 	"github.com/llm-proxy/llm-proxy/internal/provider"
 	"github.com/llm-proxy/llm-proxy/internal/provider/gemini"
 	"github.com/llm-proxy/llm-proxy/internal/provider/groq"
@@ -16,24 +17,28 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		logging.Error("config_failed", "err", err.Error())
+		os.Exit(1)
 	}
+	logging.Configure(cfg.LogLevel)
+	logging.Info("startup", "log_level", cfg.LogLevel)
 
 	st, err := store.Open(cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("store: %v", err)
+		logging.Error("store_failed", "err", err.Error())
+		os.Exit(1)
 	}
 	defer st.Close()
-	log.Printf("database: postgres")
+	logging.Info("database_ready", "driver", "postgres")
 
 	var providers []provider.Provider
 	if cfg.GeminiAPIKey != "" {
 		providers = append(providers, gemini.New(cfg.GeminiAPIKey, cfg.GeminiBaseURL))
-		log.Printf("provider enabled: gemini")
+		logging.Info("provider_enabled", "provider", "gemini")
 	}
 	if cfg.GroqAPIKey != "" {
 		providers = append(providers, groq.New(cfg.GroqAPIKey, cfg.GroqBaseURL))
-		log.Printf("provider enabled: groq")
+		logging.Info("provider_enabled", "provider", "groq")
 	}
 	if cfg.OpenRouterAPIKey != "" {
 		providers = append(providers, openrouter.New(
@@ -42,13 +47,14 @@ func main() {
 			cfg.OpenRouterSiteURL,
 			cfg.OpenRouterTitle,
 		))
-		log.Printf("provider enabled: openrouter")
+		logging.Info("provider_enabled", "provider", "openrouter")
 	}
 
 	registry := provider.NewRegistry(st, providers...)
 	srv := api.NewServer(registry, st, cfg.OpenAPIPath)
-	log.Printf("llm-proxy listening on %s (docs: /docs)", cfg.Addr)
+	logging.Info("listening", "addr", cfg.Addr, "docs", "/docs")
 	if err := http.ListenAndServe(cfg.Addr, srv.Handler()); err != nil {
-		log.Fatalf("server: %v", err)
+		logging.Error("server_failed", "err", err.Error())
+		os.Exit(1)
 	}
 }

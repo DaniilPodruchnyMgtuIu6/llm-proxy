@@ -2,12 +2,12 @@ package api
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/llm-proxy/llm-proxy/internal/logging"
 	"github.com/llm-proxy/llm-proxy/internal/provider"
 	"github.com/llm-proxy/llm-proxy/internal/store"
 )
@@ -31,7 +31,7 @@ func NewServer(registry *provider.Registry, st *store.Store, openAPIPath string)
 }
 
 func (s *Server) Handler() http.Handler {
-	return logging(s.mux)
+	return withRequestContext(s.mux)
 }
 
 func (s *Server) routes() {
@@ -46,7 +46,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/models", s.handleListModels)
 	s.mux.HandleFunc("GET /v1/stats/summary", s.handleStatsSummary)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
-	// Aliases: omit model → auto-route; same OpenAI chat body.
 	s.mux.HandleFunc("POST /v1/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("POST /v1/completion", s.handleChatCompletions)
 	s.mux.HandleFunc("POST /v1/route", s.handleRoute)
@@ -59,9 +58,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.registry.ListProviders(r.Context())
 	if err != nil {
+		logging.Errorf(r.Context(), "list_providers_failed", "err", err.Error())
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	logging.Debugf(r.Context(), "list_providers_ok", "count", len(resp.Data))
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -75,9 +76,11 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.registry.ListModels(r.Context(), filter)
 	if err != nil {
+		logging.Errorf(r.Context(), "list_models_failed", "err", err.Error())
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	logging.Debugf(r.Context(), "list_models_ok", "count", len(resp.Data), "provider", filter.Provider)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -96,9 +99,11 @@ func (s *Server) handleStatsSummary(w http.ResponseWriter, r *http.Request) {
 
 	summary, err := s.store.Summary(r.Context(), from, to, providerName)
 	if err != nil {
+		logging.Errorf(r.Context(), "stats_summary_failed", "err", err.Error())
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	logging.Debugf(r.Context(), "stats_summary_ok", "from", from, "to", to)
 	writeJSON(w, http.StatusOK, summary)
 }
 
@@ -107,6 +112,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var body json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		logging.Errorf(r.Context(), "chat_bad_json", "err", err.Error())
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -119,6 +125,7 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 
 	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		logging.Errorf(r.Context(), "route_bad_json", "err", err.Error())
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -137,7 +144,6 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(v, &opts.ExcludeModels)
 		delete(raw, "exclude_models")
 	}
-	// Force auto routing.
 	modelJSON, _ := json.Marshal("auto")
 	raw["model"] = modelJSON
 
@@ -146,12 +152,14 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid route body")
 		return
 	}
+	logging.Debugf(r.Context(), "route_options", "provider", opts.Provider, "recommended_only", opts.RecommendedOnly)
 	s.serveChat(w, r, body, opts)
 }
 
 func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.RawMessage, opts provider.RouteOptions) {
+	ctx := r.Context()
 	start := time.Now()
-	result, err := s.registry.ChatCompletions(r.Context(), body, opts)
+	result, err := s.registry.ChatCompletions(ctx, body, opts)
 	latency := time.Since(start).Milliseconds()
 
 	status := result.Status
@@ -166,15 +174,19 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 		PoolID:     provider.ResolvePoolID(result.Provider, result.Model),
 		StatusCode: status,
 		LatencyMS:  latency,
+		RequestID:  logging.RequestID(ctx),
 	}
 	if err != nil {
 		ev.ErrorType = classifyError(status, err)
 	} else {
-		fillUsageFromResponse(result.Body, &ev)
+		upstreamID := fillUsageFromResponse(result.Body, &ev)
+		if upstreamID != "" {
+			logging.Debugf(ctx, "upstream_response", "upstream_id", upstreamID, "provider", result.Provider, "model", result.Model)
+		}
 	}
 	if s.store != nil && result.Provider != "" {
-		if recErr := s.store.RecordUsage(r.Context(), ev); recErr != nil {
-			log.Printf("store record usage: %v", recErr)
+		if recErr := s.store.RecordUsage(ctx, ev); recErr != nil {
+			logging.Errorf(ctx, "store_record_usage_failed", "err", recErr.Error())
 		}
 	}
 
@@ -192,6 +204,14 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 	}
 
 	if err != nil {
+		logging.Infof(ctx, "chat_done",
+			"status", status,
+			"provider", result.Provider,
+			"model", result.Model,
+			"attempts", result.Attempts,
+			"latency_ms", latency,
+			"error", err.Error(),
+		)
 		if len(result.Body) > 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
@@ -202,12 +222,20 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 		return
 	}
 
+	logging.Infof(ctx, "chat_done",
+		"status", status,
+		"provider", result.Provider,
+		"model", result.Model,
+		"attempts", result.Attempts,
+		"latency_ms", latency,
+		"tokens", ev.TotalTokens,
+	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(result.Body)
 }
 
-func fillUsageFromResponse(body json.RawMessage, ev *store.UsageEvent) {
+func fillUsageFromResponse(body json.RawMessage, ev *store.UsageEvent) string {
 	var parsed struct {
 		ID    string `json:"id"`
 		Usage *struct {
@@ -217,14 +245,14 @@ func fillUsageFromResponse(body json.RawMessage, ev *store.UsageEvent) {
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return
+		return ""
 	}
-	ev.RequestID = parsed.ID
 	if parsed.Usage != nil {
 		ev.PromptTokens = parsed.Usage.PromptTokens
 		ev.CompletionTokens = parsed.Usage.CompletionTokens
 		ev.TotalTokens = parsed.Usage.TotalTokens
 	}
+	return parsed.ID
 }
 
 func classifyError(status int, err error) string {
@@ -265,15 +293,6 @@ func writeError(w http.ResponseWriter, status int, message string) {
 			"message": message,
 			"type":    "proxy_error",
 		},
-	})
-}
-
-func logging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rw := &statusRecorder{ResponseWriter: w, status: 200}
-		next.ServeHTTP(rw, r)
-		log.Printf("%s %s %d %s", r.Method, r.URL.Path, rw.status, time.Since(start))
 	})
 }
 
