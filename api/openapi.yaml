@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: LLM Proxy API
-  version: 0.4.0
+  version: 0.4.1
   description: |
     HTTP-прокси над бесплатными LLM-источниками (Gemini, Groq, OpenRouter).
 
@@ -168,10 +168,12 @@ paths:
       summary: Chat completions (OpenAI-compatible)
       description: |
         Проксирует запрос в backend по `model`.
-        `model: "auto"` — выбор лучшей доступной модели (rank + remaining).
-        При 429/502/503/504 — auto-fallback на следующий кандидат.
+        `model` можно не указывать или поставить `"auto"` — прокси выберет лучшую доступную модель
+        (rank + remaining) и при 429/5xx пойдёт по fallback.
+        Основные sampling-параметры (`temperature`, `top_p`, `max_tokens`, …) принимаются;
+        перед upstream тело санитизируется под возможности провайдера (неподдерживаемые поля отбрасываются).
+        Алиасы: `POST /v1/completions`, `POST /v1/completion`.
         Ответные заголовки: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`.
-        Usage и rate-limit headers пишутся в PostgreSQL.
       operationId: chatCompletions
       requestBody:
         required: true
@@ -180,6 +182,14 @@ paths:
             schema:
               $ref: "#/components/schemas/ChatCompletionRequest"
             examples:
+              no_model:
+                summary: Без model — auto-route
+                value:
+                  messages:
+                    - role: user
+                      content: ping
+                  temperature: 0.7
+                  max_tokens: 128
               auto:
                 value:
                   model: auto
@@ -192,6 +202,9 @@ paths:
                   messages:
                     - role: user
                       content: ping
+                  temperature: 0.5
+                  top_p: 0.9
+                  max_tokens: 256
               groq:
                 value:
                   model: openai/gpt-oss-20b
@@ -204,6 +217,7 @@ paths:
                   messages:
                     - role: user
                       content: ping
+                  top_k: 40
       responses:
         "200":
           description: Upstream chat completion
@@ -229,6 +243,54 @@ paths:
               schema:
                 $ref: "#/components/schemas/UpstreamError"
         "502":
+          $ref: "#/components/responses/ProxyError"
+        "503":
+          $ref: "#/components/responses/ProxyError"
+
+  /v1/completions:
+    post:
+      tags: [inference]
+      summary: Alias of /v1/chat/completions
+      description: То же тело и поведение, что у `/v1/chat/completions` (включая отсутствие `model`).
+      operationId: completionsAlias
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: Upstream chat completion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+        "400":
+          $ref: "#/components/responses/ProxyError"
+        "503":
+          $ref: "#/components/responses/ProxyError"
+
+  /v1/completion:
+    post:
+      tags: [inference]
+      summary: Alias of /v1/chat/completions
+      description: Укороченный алиас для клиентов, которым лень указывать model.
+      operationId: completionAlias
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: Upstream chat completion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+        "400":
           $ref: "#/components/responses/ProxyError"
         "503":
           $ref: "#/components/responses/ProxyError"
@@ -474,44 +536,103 @@ components:
 
     ChatCompletionRequest:
       type: object
-      required: [model, messages]
+      required: [messages]
       properties:
         model:
           type: string
-          description: ID из GET /v1/models, либо `auto` для выбора прокси
+          description: |
+            ID из GET /v1/models. Если опущен / пустой / `auto` — прокси выбирает лучшую модель
+            и делает fallback при 429/5xx.
         messages:
           type: array
           items:
             $ref: "#/components/schemas/ChatMessage"
         temperature:
           type: number
+          minimum: 0
+          maximum: 2
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+        top_k:
+          type: integer
+          description: Форвардится только если upstream поддерживает (сейчас OpenRouter)
         max_tokens:
           type: integer
+          minimum: 1
+        max_completion_tokens:
+          type: integer
+          minimum: 1
+          description: Алиас/альтернатива max_tokens (OpenAI-совместимые бэкенды)
+        n:
+          type: integer
+          minimum: 1
+          description: На Groq принимается только 1; иначе поле отбрасывается
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: string }
         stream:
           type: boolean
           description: Streaming пока не гарантируется прокси
+        presence_penalty:
+          type: number
+        frequency_penalty:
+          type: number
+        seed:
+          type: integer
+        user:
+          type: string
+        response_format:
+          type: object
+          additionalProperties: true
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+          description: string или object
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+        parallel_tool_calls:
+          type: boolean
+        reasoning_effort:
+          type: string
+          description: Gemini / часть OpenRouter; на Groq отбрасывается
+        modalities:
+          type: array
+          items: { type: string }
+          description: В основном Gemini OpenAI-compat
+        logit_bias:
+          type: object
+          additionalProperties: true
+          description: Отбрасывается на Groq/Gemini
+        logprobs:
+          type: boolean
+          description: Отбрасывается на Groq/Gemini
+        top_logprobs:
+          type: integer
+          description: Отбрасывается на Groq/Gemini
 
     RouteRequest:
-      type: object
-      required: [messages]
-      properties:
-        messages:
-          type: array
-          items:
-            $ref: "#/components/schemas/ChatMessage"
-        provider:
-          type: string
-          description: Ограничить кандидатов источником
-        recommended_only:
-          type: boolean
-        exclude_models:
-          type: array
-          items:
-            type: string
-        temperature:
-          type: number
-        max_tokens:
-          type: integer
+      allOf:
+        - $ref: "#/components/schemas/ChatCompletionRequest"
+        - type: object
+          properties:
+            provider:
+              type: string
+              description: Ограничить кандидатов источником
+            recommended_only:
+              type: boolean
+            exclude_models:
+              type: array
+              items:
+                type: string
 
     ChatCompletionResponse:
       type: object

@@ -44,7 +44,10 @@
 Через наш прокси клиенту всё равно:
 
 - `GET /v1/models`
-- `POST /v1/chat/completions`
+- `POST /v1/chat/completions` (можно без `model` → auto)
+
+Sampling: `temperature`, `top_p`, `max_tokens` / `max_completion_tokens`, `stop`, `seed`, penalties, tools — форвардим.  
+`top_k` / `logprobs` / `logit_bias` на OpenAI-compat слое **не шлём** (прокси отбрасывает). `reasoning_effort` — да.
 
 ## Бесплатные лимиты
 

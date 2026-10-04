@@ -41,7 +41,8 @@
 
 Также у Groq есть Responses API (`/responses`) — в прокси пока не используем, нам достаточно chat completions.
 
-Неподдерживаемые поля OpenAI (дадут 400): `logprobs`, `logit_bias`, `top_logprobs`, `messages[].name`; `n` только `1`.
+Неподдерживаемые поля OpenAI (дадут 400): `logprobs`, `logit_bias`, `top_logprobs`, `messages[].name`; `n` только `1`.  
+Прокси **отрезает** их в `SanitizeChatBody` перед upstream (также `top_k`, `reasoning_effort`).
 
 ## Бесплатные лимиты (Free Plan)
 

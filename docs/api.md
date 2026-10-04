@@ -17,8 +17,11 @@
 | `GET` | `/v1/providers` | источники + их квоты/здоровье |
 | `GET` | `/v1/models` | модели с `source` + `quota` + `quality_score`/`rank` (лучшие первые) |
 | `GET` | `/v1/stats/summary` | агрегаты из PostgreSQL |
-| `POST` | `/v1/chat/completions` | OpenAI-чат; `model:"auto"` + fallback 429/5xx |
+| `POST` | `/v1/chat/completions` | OpenAI-чат; `model` опционален (`auto` / omit) + fallback |
+| `POST` | `/v1/completions` | алиас chat |
+| `POST` | `/v1/completion` | алиас chat |
 | `POST` | `/v1/route` | авто-выбор модели (фильтры `provider` / `recommended_only`) |
+
 ## GET `/v1/providers`
 
 Обзор источников для дашборда / роутера.
@@ -156,7 +159,26 @@ curl -s http://localhost:8080/v1/route -H "Content-Type: application/json" -d "{
 
 ## POST `/v1/chat/completions`
 
-OpenAI-тело. `model` = id из `/v1/models` **или** `"auto"`.  
+OpenAI-тело. **`model` можно не указывать** (или `"auto"`) — прокси подставит лучшую модель и пойдёт по fallback.  
+Алиасы: `/v1/completions`, `/v1/completion`.
+
+```bash
+curl -s http://localhost:8080/v1/completion -H "Content-Type: application/json" -d "{\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"temperature\":0.7,\"max_tokens\":64}"
+```
+
+Основные параметры (принимаются API): `temperature`, `top_p`, `top_k`, `max_tokens`, `max_completion_tokens`, `n`, `stop`, `stream`, `presence_penalty`, `frequency_penalty`, `seed`, `user`, `response_format`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort`, `modalities`, `logit_bias`, `logprobs`, `top_logprobs`.
+
+Перед upstream тело **санитизируется** под провайдер:
+
+| Поле | Gemini | Groq | OpenRouter |
+|------|--------|------|------------|
+| temperature / top_p / max_tokens | да | да | да |
+| top_k | нет | нет | да |
+| reasoning_effort | да | нет | да |
+| logprobs / logit_bias / top_logprobs | нет | нет | да |
+| messages[].name | да | нет | да |
+| n ≠ 1 | да | нет (отбрасываем) | да |
+
 При 429/502/503/504 — fallback на следующий кандидат по `rank`.  
 Заголовки ответа: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`.
 
