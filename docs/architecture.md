@@ -2,6 +2,10 @@
 
 Документ описывает, как устроена система: компоненты, потоки данных, квоты, ранжирование моделей и учёт статистики.
 
+> **Как смотреть диаграммы:** встроенный Markdown Preview в Cursor/VS Code **не рисует** Mermaid.  
+> Открой рендер с Mermaid.js: [http://localhost:8080/architecture](http://localhost:8080/architecture)  
+> На GitHub диаграммы тоже отображаются. Сырой файл: [`architecture.md`](./architecture.md).
+
 Интерактивный API: [/docs](http://localhost:8080/docs) · карточки провайдеров: [`docs/providers/`](./providers/).
 
 ## 1. Обзор
@@ -15,12 +19,12 @@
 
 ```mermaid
 flowchart LR
-  Main[Основная система] --> API[LLM Proxy :8080]
-  API --> G[Gemini AI Studio]
-  API --> Q[GroqCloud]
+  Main[Main system] --> API[LLM Proxy :8080]
+  API --> G[Gemini]
+  API --> Q[Groq]
   API --> O[OpenRouter]
   API --> PG[(PostgreSQL)]
-  PGAdmin[pgAdmin :5050] --> PG
+  Admin[pgAdmin :5050] --> PG
 ```
 
 ## 2. Компоненты
@@ -38,7 +42,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  subgraph Proxy["cmd/server"]
+  subgraph Proxy[cmd/server]
     CFG[config.Load]
     API[api.Server]
     REG[provider.Registry]
@@ -64,28 +68,28 @@ sequenceDiagram
   participant R as Registry
   participant P as Providers
   participant S as Postgres
-  participant OR as OpenRouter /key
+  participant K as OpenRouter Key API
 
   C->>A: GET /v1/models
-  A->>R: ListModels(filter)
+  A->>R: ListModels filter
   loop each provider
-    R->>P: ListModels()
+    R->>P: ListModels
     alt upstream OK
       P-->>R: raw models
-      R->>R: quality_score = ranking.Score()
+      R->>R: ranking.Score
       alt openrouter free pool
-        P->>OR: GET /key (live remaining)
-        OR-->>P: free_model_daily_requests
-      else gemini / groq
-        R->>S: success_count(day, model|pool)
+        P->>K: GET /key
+        K-->>P: remaining RPD
+      else gemini or groq
+        R->>S: success_count
         S-->>R: used
         R->>R: remaining = rpd - used
       end
     else upstream error
-      P-->>R: error (провайдер пропускается, остальные продолжают)
+      P-->>R: skip provider
     end
   end
-  R->>R: sort by quality_score DESC, assign rank
+  R->>R: sort by score DESC
   R-->>A: ModelsResponse
   A-->>C: JSON
 ```
@@ -100,14 +104,14 @@ sequenceDiagram
   participant U as Upstream
   participant S as Postgres
 
-  C->>A: POST /v1/chat/completions {model, messages}
-  A->>R: ChatCompletions(body)
-  R->>R: resolve provider by model id
-  R->>U: forward OpenAI-compat request
-  U-->>R: response / error
-  R-->>A: body, status, provider, model
-  A->>S: RecordUsage (event + daily_counters + health)
-  A-->>C: upstream JSON (or proxy_error)
+  C->>A: POST /v1/chat/completions
+  A->>R: ChatCompletions
+  R->>R: resolve provider by model
+  R->>U: forward request
+  U-->>R: response or error
+  R-->>A: body status provider model
+  A->>S: RecordUsage
+  A-->>C: JSON response
 ```
 
 ## 5. Алгоритм ранжирования моделей
@@ -119,19 +123,19 @@ sequenceDiagram
 ```mermaid
 flowchart TD
   A[model id + provider] --> B{provider?}
-  B -->|gemini| G[Tier: Pro 9200 / Flash 7800 / Flash-Lite 6400]
-  G --> GV[+ version* : gemini-3.8 → +380]
-  GV --> GS[Specialty penalties: image/live/tts/...]
-  B -->|groq| Q[Fixed table: 120b > 20b > qwen > ...]
-  B -->|openrouter| O[Heuristics: ultra/pro/Xb + :free bonus]
+  B -->|gemini| G[Tier Pro / Flash / Flash-Lite]
+  G --> GV[Add version bonus]
+  GV --> GS[Specialty lower score]
+  B -->|groq| Q[Fixed table 120b then 20b then qwen]
+  B -->|openrouter| O[Heuristics by name size]
   O --> OR{openrouter/free?}
-  OR -->|yes| M[Mid score 5800 - auto router]
-  OR -->|no| H[name/params heuristics]
+  OR -->|yes| M[Mid score auto router]
+  OR -->|no| H[name heuristics]
   GS --> OUT[quality_score]
   Q --> OUT
   H --> OUT
   M --> OUT
-  OUT --> SORT[stable sort DESC → rank 1..N]
+  OUT --> SORT[stable sort DESC to rank]
 ```
 
 ### Принципы по источникам (на основе docs провайдеров)
@@ -153,13 +157,13 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  Start[Model.Quota from catalog / live] --> Live{source=live AND remaining_rpd set?}
+  Start[Quota from catalog or live] --> Live{live remaining set?}
   Live -->|yes OpenRouter| Keep[Keep upstream remaining]
-  Live -->|no| HasRPD{catalog.rpd known?}
-  HasRPD -->|no| Unk[remaining = null]
-  HasRPD -->|yes| DB[Postgres daily_counters.success_count]
-  DB --> Calc["remaining = max(0, rpd - used)"]
-  Calc --> Local[source = local_db]
+  Live -->|no| HasRPD{catalog rpd known?}
+  HasRPD -->|no| Unk[remaining null]
+  HasRPD -->|yes| DB[Postgres daily_counters]
+  DB --> Calc[remaining = max 0 rpd - used]
+  Calc --> Local[source local_db]
 ```
 
 | Поле | Смысл |
@@ -174,8 +178,8 @@ flowchart TD
 ```mermaid
 flowchart LR
   Ev[usage event ts] --> P{provider}
-  P -->|gemini| PT[America/Los_Angeles calendar day]
-  P -->|groq / openrouter| UTC[UTC calendar day]
+  P -->|gemini| PT[Pacific calendar day]
+  P -->|groq or openrouter| UTC[UTC calendar day]
   PT --> Key[(daily_counters.day)]
   UTC --> Key
 ```
@@ -193,10 +197,10 @@ flowchart LR
 ```mermaid
 flowchart TB
   Chat[Chat response] --> Class{status}
-  Class -->|2xx| OK[success_count + 1]
-  Class -->|429| RL[rate_limit_count + 1<br/>error_count + 1]
-  Class -->|other err| ER[error_count + 1]
-  OK --> T[tokens from usage if present]
+  Class -->|2xx| OK[success_count +1]
+  Class -->|429| RL[rate_limit and error +1]
+  Class -->|other| ER[error_count +1]
+  OK --> T[tokens if present]
   RL --> H[provider_health]
   ER --> H
   OK --> H
@@ -211,13 +215,13 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-  A[GET /v1/providers] --> B[drop unhealthy]
-  B --> C[GET /v1/models?recommended=true]
-  C --> D[уже отсортировано: rank 1 = лучшая]
-  D --> E{remaining_rpd == 0?}
+  A[GET providers] --> B[drop unhealthy]
+  B --> C[GET models recommended]
+  C --> D[sorted rank 1 is best]
+  D --> E{remaining_rpd is 0?}
   E -->|yes| F[next model]
-  E -->|no / null| G[POST chat]
-  G --> H{429 / 5xx?}
+  E -->|no or null| G[POST chat]
+  G --> H{429 or 5xx?}
   H -->|yes| F
   H -->|no| I[done]
 ```
@@ -228,7 +232,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-  App[llm-proxy] -->|DB_HOST DB_PORT DB_USER DB_PASSWORD DB_NAME| PG[(postgres:16)]
+  App[llm-proxy] -->|DB_* env| PG[(postgres 16)]
   Admin[pgAdmin :5050] -->|UI| PG
 ```
 

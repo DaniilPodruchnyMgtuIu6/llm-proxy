@@ -6,7 +6,7 @@ HTTP-прокси для работы с разными LLM через един�
 
 | Документ | Содержание |
 |----------|------------|
-| [`docs/architecture.md`](./docs/architecture.md) | Архитектура, алгоритмы квот/ранжирования, Mermaid |
+| [`docs/architecture.md`](./docs/architecture.md) | Архитектура + Mermaid (смотреть через [/architecture](http://localhost:8080/architecture)) |
 | [`docs/api.md`](./docs/api.md) | Контракт для основной системы |
 | [`docs/providers/`](./docs/providers/) | Карточки Gemini / Groq / OpenRouter |
 | [/docs](http://localhost:8080/docs) | Swagger UI |
@@ -18,6 +18,7 @@ HTTP-прокси для работы с разными LLM через един�
 | Метод | Путь | Назначение |
 |-------|------|------------|
 | `GET` | `/docs` | Swagger UI |
+| `GET` | `/architecture` | Архитектура с отрисовкой Mermaid |
 | `GET` | `/openapi.yaml` | OpenAPI 3 |
 | `GET` | `/healthz` | Healthcheck |
 | `GET` | `/v1/providers` | Источники + квоты |

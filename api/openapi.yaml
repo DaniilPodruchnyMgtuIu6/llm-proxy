@@ -67,6 +67,35 @@ paths:
               schema:
                 type: string
 
+  /architecture:
+    get:
+      tags: [docs]
+      summary: Architecture docs with Mermaid diagrams
+      description: |
+        HTML-страница рендерит `docs/architecture.md` через marked + mermaid.js.
+        Встроенный Markdown Preview в Cursor/VS Code Mermaid не рисует — используй этот URL.
+      operationId: architectureUI
+      responses:
+        "200":
+          description: HTML architecture viewer
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /architecture.md:
+    get:
+      tags: [docs]
+      summary: Raw architecture markdown
+      operationId: architectureMarkdown
+      responses:
+        "200":
+          description: Markdown source
+          content:
+            text/markdown:
+              schema:
+                type: string
+
   /openapi.yaml:
     get:
       tags: [docs]
