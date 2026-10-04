@@ -3,6 +3,8 @@
 bin/
 dist/
 data/
+llm-proxy-image.tar
+*.tar
 *.db
 *.db-journal
 .idea/
