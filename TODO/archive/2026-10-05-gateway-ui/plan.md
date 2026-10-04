@@ -2,7 +2,7 @@
 
 - **ID:** `2026-10-04T231000-gateway-ui`
 - **Created:** 2026-10-04T23:10:00+03:00
-- **Status:** done
+- **Status:** archived
 - **Branch:** `feat/gateway-ui`
 - **Supersedes archive:** `archive/2026-10-04-reliability`
 
