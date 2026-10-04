@@ -46,6 +46,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/models", s.handleListModels)
 	s.mux.HandleFunc("GET /v1/stats/summary", s.handleStatsSummary)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	s.mux.HandleFunc("POST /v1/route", s.handleRoute)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -107,38 +108,91 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.serveChat(w, r, body, provider.RouteOptions{})
+}
+
+func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	opts := provider.RouteOptions{}
+	if v, ok := raw["provider"]; ok {
+		_ = json.Unmarshal(v, &opts.Provider)
+		opts.Provider = strings.TrimSpace(opts.Provider)
+		delete(raw, "provider")
+	}
+	if v, ok := raw["recommended_only"]; ok {
+		_ = json.Unmarshal(v, &opts.RecommendedOnly)
+		delete(raw, "recommended_only")
+	}
+	if v, ok := raw["exclude_models"]; ok {
+		_ = json.Unmarshal(v, &opts.ExcludeModels)
+		delete(raw, "exclude_models")
+	}
+	// Force auto routing.
+	modelJSON, _ := json.Marshal("auto")
+	raw["model"] = modelJSON
+
+	body, err := json.Marshal(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid route body")
+		return
+	}
+	s.serveChat(w, r, body, opts)
+}
+
+func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.RawMessage, opts provider.RouteOptions) {
 	start := time.Now()
-	respBody, status, providerName, modelID, err := s.registry.ChatCompletions(r.Context(), body)
+	result, err := s.registry.ChatCompletions(r.Context(), body, opts)
 	latency := time.Since(start).Milliseconds()
+
+	status := result.Status
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
 
 	ev := store.UsageEvent{
 		TS:         time.Now().UTC(),
-		Provider:   providerName,
-		Model:      modelID,
-		PoolID:     provider.ResolvePoolID(providerName, modelID),
+		Provider:   result.Provider,
+		Model:      result.Model,
+		PoolID:     provider.ResolvePoolID(result.Provider, result.Model),
 		StatusCode: status,
 		LatencyMS:  latency,
-	}
-	if status == 0 {
-		status = http.StatusBadGateway
-		ev.StatusCode = status
 	}
 	if err != nil {
 		ev.ErrorType = classifyError(status, err)
 	} else {
-		fillUsageFromResponse(respBody, &ev)
+		fillUsageFromResponse(result.Body, &ev)
 	}
-	if s.store != nil && providerName != "" {
+	if s.store != nil && result.Provider != "" {
 		if recErr := s.store.RecordUsage(r.Context(), ev); recErr != nil {
 			log.Printf("store record usage: %v", recErr)
 		}
 	}
 
+	if result.Model != "" {
+		w.Header().Set("X-LLM-Proxy-Model", result.Model)
+	}
+	if result.Provider != "" {
+		w.Header().Set("X-LLM-Proxy-Provider", result.Provider)
+	}
+	if result.Attempts > 0 {
+		w.Header().Set("X-LLM-Proxy-Attempts", strconv.Itoa(result.Attempts))
+	}
+	if len(result.Tried) > 0 {
+		w.Header().Set("X-LLM-Proxy-Tried", strings.Join(result.Tried, ","))
+	}
+
 	if err != nil {
-		if len(respBody) > 0 {
+		if len(result.Body) > 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
-			_, _ = w.Write(respBody)
+			_, _ = w.Write(result.Body)
 			return
 		}
 		writeError(w, status, err.Error())
@@ -147,7 +201,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write(respBody)
+	_, _ = w.Write(result.Body)
 }
 
 func fillUsageFromResponse(body json.RawMessage, ev *store.UsageEvent) {

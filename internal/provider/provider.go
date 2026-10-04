@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 )
 
 // Source identifies the backend that serves a model.
@@ -20,6 +21,7 @@ type Quota struct {
 	TPD *int64 `json:"tpd,omitempty"`
 
 	RemainingRPM *int64 `json:"remaining_rpm"`
+	RemainingTPM *int64 `json:"remaining_tpm,omitempty"`
 	RemainingRPD *int64 `json:"remaining_rpd"`
 	UsedRPD      *int64 `json:"used_rpd,omitempty"`
 
@@ -94,5 +96,5 @@ type Provider interface {
 	DocsURL() string
 	ListModels(ctx context.Context) ([]Model, error)
 	Status(ctx context.Context) (Status, error)
-	ChatCompletions(ctx context.Context, body json.RawMessage) (json.RawMessage, int, error)
+	ChatCompletions(ctx context.Context, body json.RawMessage) (json.RawMessage, int, http.Header, error)
 }

@@ -163,28 +163,28 @@ func (c *Client) fetchFreeDaily(ctx context.Context) (remaining, used, limit *in
 	return &f.Remaining, &f.Used, &f.Limit, true
 }
 
-func (c *Client) ChatCompletions(ctx context.Context, body json.RawMessage) (json.RawMessage, int, error) {
+func (c *Client) ChatCompletions(ctx context.Context, body json.RawMessage) (json.RawMessage, int, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return nil, 500, err
+		return nil, 500, nil, err
 	}
 	c.setAuth(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 502, err
+		return nil, 502, nil, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, 502, err
+		return nil, 502, resp.Header, err
 	}
 	if resp.StatusCode >= 300 {
-		return respBody, resp.StatusCode, fmt.Errorf("openrouter chat: status %d", resp.StatusCode)
+		return respBody, resp.StatusCode, resp.Header.Clone(), fmt.Errorf("openrouter chat: status %d", resp.StatusCode)
 	}
-	return json.RawMessage(respBody), resp.StatusCode, nil
+	return json.RawMessage(respBody), resp.StatusCode, resp.Header.Clone(), nil
 }
 
 func (c *Client) setAuth(req *http.Request) {
