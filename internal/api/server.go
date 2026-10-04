@@ -46,6 +46,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/models", s.handleListModels)
 	s.mux.HandleFunc("GET /v1/stats/summary", s.handleStatsSummary)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	// Aliases: omit model → auto-route; same OpenAI chat body.
+	s.mux.HandleFunc("POST /v1/completions", s.handleChatCompletions)
+	s.mux.HandleFunc("POST /v1/completion", s.handleChatCompletions)
 	s.mux.HandleFunc("POST /v1/route", s.handleRoute)
 }
 

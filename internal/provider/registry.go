@@ -204,12 +204,17 @@ func (r *Registry) ListProviders(ctx context.Context) (ProvidersResponse, error)
 }
 
 // ChatCompletions routes a chat request, with auto-select and fallback on 429/5xx.
+// Empty / missing model (or "auto") picks the best available candidate.
 func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, opts RouteOptions) (ChatResult, error) {
 	var req struct {
-		Model string `json:"model"`
+		Model    string          `json:"model"`
+		Messages json.RawMessage `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return ChatResult{Status: 400}, fmt.Errorf("invalid request body: %w", err)
+	}
+	if len(req.Messages) == 0 || string(req.Messages) == "null" {
+		return ChatResult{Status: 400}, fmt.Errorf("messages is required")
 	}
 
 	model := strings.TrimSpace(req.Model)
@@ -229,17 +234,23 @@ func (r *Registry) ChatCompletions(ctx context.Context, body json.RawMessage, op
 	var last ChatResult
 	var lastErr error
 	for _, c := range candidates {
+		r.mu.RLock()
+		p, ok := r.byModel[c.ID]
+		r.mu.RUnlock()
+		if !ok {
+			continue
+		}
+
 		attemptBody, err := setModel(body, c.ID)
 		if err != nil {
 			last = ChatResult{Status: 400, Provider: c.Provider, Model: c.ID}
 			lastErr = err
 			continue
 		}
-
-		r.mu.RLock()
-		p, ok := r.byModel[c.ID]
-		r.mu.RUnlock()
-		if !ok {
+		attemptBody, err = SanitizeChatBody(p.Name(), attemptBody)
+		if err != nil {
+			last = ChatResult{Status: 400, Provider: c.Provider, Model: c.ID}
+			lastErr = err
 			continue
 		}
 
