@@ -1,6 +1,7 @@
 ﻿package main
 
 import (
+	"context"
 	"net/http"
 	"os"
 
@@ -48,6 +49,25 @@ func main() {
 	} else if merged {
 		logging.Info("runtime_merged_env_keys")
 	}
+
+	seed := store.Preset{Model: "auto"}
+	if d := rt.Get().Defaults; d.Model != "" || d.Temperature != nil || d.TopP != nil || d.MaxTokens != nil {
+		seed.Model = d.Model
+		if seed.Model == "" {
+			seed.Model = "auto"
+		}
+		seed.Temperature = d.Temperature
+		seed.TopP = d.TopP
+		seed.TopK = d.TopK
+		seed.MaxTokens = d.MaxTokens
+		seed.PresencePenalty = d.PresencePenalty
+		seed.FrequencyPenalty = d.FrequencyPenalty
+	}
+	if err := st.EnsureDefaultPreset(context.Background(), seed); err != nil {
+		logging.Error("preset_default_seed_failed", "err", err.Error())
+		os.Exit(1)
+	}
+	logging.Info("preset_default_ready", "model", seed.Model)
 
 	keys := app.EffectiveKeys(cfg, rt)
 	providers := app.BuildProviders(cfg, keys)

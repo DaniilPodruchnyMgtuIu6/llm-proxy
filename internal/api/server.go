@@ -77,12 +77,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("POST /v1/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("POST /v1/completion", s.handleChatCompletions)
+	s.mux.HandleFunc("POST /v1/p/{slug}/chat/completions", s.handlePresetChatCompletions)
 	s.mux.HandleFunc("POST /v1/route", s.handleRoute)
 
 	s.mux.HandleFunc("GET /admin/status", s.handleAdminStatus)
 	s.mux.HandleFunc("PUT /admin/keys", s.handleAdminKeys)
 	s.mux.HandleFunc("PUT /admin/defaults", s.handleAdminDefaults)
 	s.mux.HandleFunc("POST /admin/apply", s.handleAdminApply)
+
+	s.mux.HandleFunc("GET /admin/presets", s.handleAdminListPresets)
+	s.mux.HandleFunc("POST /admin/presets", s.handleAdminCreatePreset)
+	s.mux.HandleFunc("GET /admin/presets/{slug}", s.handleAdminGetPreset)
+	s.mux.HandleFunc("PUT /admin/presets/{slug}", s.handleAdminUpdatePreset)
+	s.mux.HandleFunc("DELETE /admin/presets/{slug}", s.handleAdminDeletePreset)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -150,13 +157,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := provider.ValidateChatBody(body); err != nil {
-		logging.Infof(r.Context(), "chat_validation_failed", "err", err.Error())
-		writeError(w, http.StatusBadRequest, err.Error())
+
+	merged, err := s.mergePresetBody(r, "default", body)
+	if err != nil {
+		logging.Infof(r.Context(), "chat_default_preset_failed", "err", err.Error())
+		writePresetErr(w, err)
 		return
 	}
-
-	s.serveChat(w, r, body, provider.RouteOptions{})
+	logging.Debugf(r.Context(), "chat_default_preset_merged")
+	s.serveChat(w, r, merged, provider.RouteOptions{}, "default")
 }
 
 func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
@@ -191,16 +200,17 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid route body")
 		return
 	}
-	if err := provider.ValidateChatBody(body); err != nil {
-		logging.Infof(r.Context(), "route_validation_failed", "err", err.Error())
-		writeError(w, http.StatusBadRequest, err.Error())
+	merged, merr := s.mergePresetBody(r, "default", body)
+	if merr != nil {
+		logging.Infof(r.Context(), "route_default_preset_failed", "err", merr.Error())
+		writePresetErr(w, merr)
 		return
 	}
 	logging.Debugf(r.Context(), "route_options", "provider", opts.Provider, "recommended_only", opts.RecommendedOnly)
-	s.serveChat(w, r, body, opts)
+	s.serveChat(w, r, merged, opts, "default")
 }
 
-func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.RawMessage, opts provider.RouteOptions) {
+func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.RawMessage, opts provider.RouteOptions, presetSlug string) {
 	ctx := r.Context()
 	start := time.Now()
 	result, err := s.registry.ChatCompletions(ctx, body, opts)
@@ -219,6 +229,7 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 				Provider:   a.Provider,
 				Model:      a.Model,
 				PoolID:     provider.ResolvePoolID(a.Provider, a.Model),
+				Preset:     presetSlug,
 				StatusCode: a.Status,
 				LatencyMS:  a.LatencyMS,
 				RequestID:  reqID,
@@ -241,6 +252,7 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 		ev := store.UsageEvent{
 			TS: time.Now().UTC(), Provider: result.Provider, Model: result.Model,
 			PoolID: provider.ResolvePoolID(result.Provider, result.Model),
+			Preset: presetSlug,
 			StatusCode: status, LatencyMS: latency, RequestID: reqID,
 		}
 		if err != nil {
@@ -257,6 +269,9 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 	if result.Provider != "" {
 		w.Header().Set("X-LLM-Proxy-Provider", result.Provider)
 	}
+	if presetSlug != "" {
+		w.Header().Set("X-LLM-Proxy-Preset", presetSlug)
+	}
 	if result.Attempts > 0 {
 		w.Header().Set("X-LLM-Proxy-Attempts", strconv.Itoa(result.Attempts))
 	}
@@ -269,6 +284,7 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 			"status", status,
 			"provider", result.Provider,
 			"model", result.Model,
+			"preset", presetSlug,
 			"attempts", result.Attempts,
 			"latency_ms", latency,
 			"error", err.Error(),
@@ -293,6 +309,7 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, body json.Raw
 		"status", status,
 		"provider", result.Provider,
 		"model", result.Model,
+		"preset", presetSlug,
 		"attempts", result.Attempts,
 		"latency_ms", latency,
 		"tokens", tokens,

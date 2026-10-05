@@ -9,6 +9,7 @@ import (
 	"github.com/llm-proxy/llm-proxy/internal/logging"
 	"github.com/llm-proxy/llm-proxy/internal/provider"
 	"github.com/llm-proxy/llm-proxy/internal/runtime"
+	"github.com/llm-proxy/llm-proxy/internal/store"
 )
 
 func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +113,24 @@ func (s *Server) handleAdminDefaults(w http.ResponseWriter, r *http.Request) {
 	if err := s.runtime.Save(st); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if s.store != nil {
+		_, err := s.store.UpdatePreset(r.Context(), "default", store.Preset{
+			Title:            "Default",
+			Description:      "System preset used by POST /v1/chat/completions when fields are omitted.",
+			Model:            body.Model,
+			Temperature:      body.Temperature,
+			TopP:             body.TopP,
+			TopK:             body.TopK,
+			MaxTokens:        body.MaxTokens,
+			PresencePenalty:  body.PresencePenalty,
+			FrequencyPenalty: body.FrequencyPenalty,
+		})
+		if err != nil {
+			logging.Errorf(r.Context(), "admin_defaults_preset_sync_failed", "err", err.Error())
+			writeError(w, http.StatusInternalServerError, "defaults saved but preset sync failed: "+err.Error())
+			return
+		}
 	}
 	logging.Infof(r.Context(), "admin_defaults_updated", "model", st.Defaults.Model)
 	writeJSON(w, http.StatusOK, map[string]any{"defaults": st.Defaults})
