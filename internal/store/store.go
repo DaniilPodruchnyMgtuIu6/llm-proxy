@@ -19,6 +19,7 @@ type UsageEvent struct {
 	Provider         string
 	Model            string
 	PoolID           string
+	Preset           string
 	StatusCode       int
 	LatencyMS        int64
 	PromptTokens     int64
@@ -120,11 +121,12 @@ func (s *Store) RecordUsage(ctx context.Context, ev UsageEvent) error {
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO usage_events(
   ts, provider, model, pool_id, status_code, latency_ms,
-  prompt_tokens, completion_tokens, total_tokens, error_type, request_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+  prompt_tokens, completion_tokens, total_tokens, error_type, request_id, preset
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		ev.TS.UTC(),
 		ev.Provider, ev.Model, nullPool(ev.PoolID), ev.StatusCode, ev.LatencyMS,
 		ev.PromptTokens, ev.CompletionTokens, ev.TotalTokens, ev.ErrorType, ev.RequestID,
+		nullPool(ev.Preset),
 	)
 	if err != nil {
 		return err
