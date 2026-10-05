@@ -20,9 +20,10 @@
         </div>
       </div>
       <nav id="nav">
-        <button data-view="gateway" class="active">Настройки</button>
+        <button data-view="presets" class="active">Пресеты</button>
         <button data-view="overview">Модели и статистика</button>
         <button data-view="chat">Чат</button>
+        <button data-view="gateway">Настройки</button>
         <button data-view="keys">Ключи</button>
       </nav>
       <div class="rail-foot">
@@ -34,10 +35,10 @@
     <main>
       <header class="top">
         <div>
-          <h1 id="view-title">Настройки</h1>
-          <p id="view-sub">Модель по умолчанию и параметры — применяются без перезапуска Docker</p>
+          <h1 id="view-title">Пресеты</h1>
+          <p id="view-sub">Именованные конфиги model + sampling с готовым URL</p>
         </div>
-        <button id="btn-apply" class="btn primary">Сохранить и применить</button>
+        <button id="btn-apply" class="btn primary hidden">Сохранить</button>
       </header>
 
       <section id="view-setup" class="panel hidden">
@@ -47,41 +48,76 @@
         <button id="btn-setup-save" class="btn primary">Сохранить и применить</button>
       </section>
 
-      <section id="view-gateway" class="panel">
-        <div class="grid two">
+      <section id="view-presets" class="panel">
+        <div class="grid two presets-layout">
           <article class="card">
-            <h3>Модель по умолчанию</h3>
+            <div class="section-title row-between">
+              <div>
+                <h3>Список</h3>
+                <p>Системный <code>default</code> нельзя удалить</p>
+              </div>
+              <button id="btn-preset-new" class="btn">Новый</button>
+            </div>
+            <ul id="preset-list" class="preset-list"></ul>
+          </article>
+          <article class="card">
+            <h3 id="preset-form-title">Редактирование</h3>
+            <div class="grid two params">
+              <label class="field"><span>slug</span><input id="ps-slug" type="text" pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="work" /></label>
+              <label class="field"><span>название</span><input id="ps-title" type="text" placeholder="Work" /></label>
+            </div>
+            <label class="field"><span>описание</span><input id="ps-description" type="text" placeholder="опционально" /></label>
             <label class="field">
-              <span>Режим</span>
-              <select id="model-mode">
+              <span>режим модели</span>
+              <select id="ps-model-mode">
                 <option value="auto">auto — лучшая доступная + запасные</option>
                 <option value="fixed">конкретная модель</option>
               </select>
             </label>
             <label class="field">
-              <span>Модель</span>
-              <select id="model-id" disabled></select>
+              <span>модель</span>
+              <select id="ps-model-id" disabled></select>
             </label>
-            <p class="muted">Параметры ниже уходят в запрос, если заполнены. Диапазоны: temperature 0–2, top_p 0–1, max_tokens ≥ 8, top_k 1–200, penalties −2…2. Неподдерживаемые поля прокси отрежет сам.</p>
+            <p class="muted">Параметры уходят в запрос, если заполнены. Явное поле в теле клиента перекрывает пресет. Диапазоны: temperature 0–2, top_p 0–1, max_tokens ≥ 8, top_k 1–200, penalties −2…2.</p>
             <div class="grid two params">
-              <label class="field"><span>temperature</span><input id="p-temperature" type="number" min="0" max="2" step="0.1" placeholder="—" /></label>
-              <label class="field"><span>top_p</span><input id="p-top_p" type="number" min="0" max="1" step="0.05" placeholder="—" /></label>
-              <label class="field"><span>max_tokens</span><input id="p-max_tokens" type="number" min="8" max="128000" step="1" placeholder="256" /></label>
-              <label class="field"><span>top_k</span><input id="p-top_k" type="number" min="1" max="200" step="1" placeholder="—" /></label>
-              <label class="field"><span>presence_penalty</span><input id="p-presence_penalty" type="number" min="-2" max="2" step="0.1" placeholder="—" /></label>
-              <label class="field"><span>frequency_penalty</span><input id="p-frequency_penalty" type="number" min="-2" max="2" step="0.1" placeholder="—" /></label>
+              <label class="field"><span>temperature</span><input id="ps-temperature" type="number" min="0" max="2" step="0.1" placeholder="—" /></label>
+              <label class="field"><span>top_p</span><input id="ps-top_p" type="number" min="0" max="1" step="0.05" placeholder="—" /></label>
+              <label class="field"><span>max_tokens</span><input id="ps-max_tokens" type="number" min="8" max="128000" step="1" placeholder="256" /></label>
+              <label class="field"><span>top_k</span><input id="ps-top_k" type="number" min="1" max="200" step="1" placeholder="—" /></label>
+              <label class="field"><span>presence_penalty</span><input id="ps-presence_penalty" type="number" min="-2" max="2" step="0.1" placeholder="—" /></label>
+              <label class="field"><span>frequency_penalty</span><input id="ps-frequency_penalty" type="number" min="-2" max="2" step="0.1" placeholder="—" /></label>
+            </div>
+            <div class="row-actions">
+              <button id="btn-preset-save" class="btn primary">Сохранить пресет</button>
+              <button id="btn-preset-delete" class="btn danger hidden">Удалить</button>
+            </div>
+            <div id="preset-endpoint" class="preset-endpoint hidden">
+              <p class="muted">Готовый URL (достаточно передать <code>messages</code>):</p>
+              <pre id="preset-url" class="code"></pre>
+              <pre id="preset-curl" class="code"></pre>
+              <button id="btn-preset-copy" class="btn">Копировать curl</button>
             </div>
           </article>
+        </div>
+      </section>
+
+      <section id="view-gateway" class="panel hidden">
+        <div class="grid two">
           <article class="card">
             <h3>Как вызывать API</h3>
+            <p class="muted">Основной путь — пресет с готовым URL. Создайте конфиг на вкладке <strong>Пресеты</strong>, затем вызывайте только с <code>messages</code>.</p>
             <p class="muted">Базовый адрес (через этот UI):</p>
             <pre id="api-base" class="code"></pre>
-            <p class="muted">Пример запроса (без model = auto):</p>
+            <p class="muted">Пример с пресетом:</p>
             <pre id="api-example" class="code"></pre>
+          </article>
+          <article class="card">
+            <h3>Доступ UI</h3>
             <label class="field">
               <span>Ключ PROXY_API_KEY для UI (если включён на сервере)</span>
               <input id="ui-proxy-key" type="password" placeholder="необязательно" />
             </label>
+            <p class="muted">Ключи провайдеров — на вкладке «Ключи». Дефолтные параметры чата — системный пресет <code>default</code>.</p>
           </article>
         </div>
       </section>
@@ -175,6 +211,10 @@
 
       <section id="view-chat" class="panel hidden">
         <div class="card chat">
+          <label class="field inline chat-preset">
+            <span>Пресет</span>
+            <select id="chat-preset"></select>
+          </label>
           <div id="chat-log" class="chat-log hidden"></div>
           <form id="chat-form" class="chat-form">
             <textarea id="chat-input" rows="3" placeholder="Напишите сообщение…"></textarea>

@@ -5,6 +5,9 @@ const state = {
   status: null,
   models: [],
   providers: [],
+  presets: [],
+  editingSlug: null,
+  isNew: false,
   pollTimer: null,
 };
 
@@ -45,19 +48,23 @@ function toast(msg, isErr = false) {
 function showView(name) {
   $$(".panel").forEach((p) => p.classList.add("hidden"));
   const map = {
-    gateway: ["view-gateway", "Настройки", "Модель по умолчанию и параметры — применяются без перезапуска Docker"],
+    presets: ["view-presets", "Пресеты", "Именованные конфиги model + sampling с готовым URL"],
+    gateway: ["view-gateway", "Настройки", "Базовый URL и ключ доступа UI"],
     overview: ["view-overview", "Модели и статистика", "Остатки запросов и история использования"],
-    chat: ["view-chat", "Чат", "Проверка gateway с текущими настройками"],
+    chat: ["view-chat", "Чат", "Проверка gateway через выбранный пресет"],
     keys: ["view-keys", "Ключи", "API-ключи провайдеров → runtime-хранилище"],
     setup: ["view-setup", "Первый запуск", "Добавьте ключи, чтобы gateway заработал"],
   };
-  const [id, title, sub] = map[name] || map.gateway;
+  const [id, title, sub] = map[name] || map.presets;
   $(`#${id}`).classList.remove("hidden");
   $("#view-title").textContent = title;
   $("#view-sub").textContent = sub;
   $$("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
-  $("#btn-apply").classList.toggle("hidden", name !== "gateway");
+  $("#btn-apply").classList.add("hidden");
   if (name === "overview") refreshOverview();
+  if (name === "presets") loadPresets().catch((e) => toast(e.message, true));
+  if (name === "chat") fillChatPresetSelect();
+  if (name === "gateway") updateApiSnippets();
 }
 
 function keyFields(targetId, values = {}) {
@@ -95,23 +102,8 @@ async function loadStatus() {
   $("#setup-pill").className = `pill ${complete ? "ok" : "warn"}`;
   keyFields("#setup-keys", state.status.providers);
   keyFields("#keys-form", state.status.providers);
-  fillDefaults(state.status.defaults || {});
   if (!complete) showView("setup");
   return state.status;
-}
-
-function fillDefaults(d) {
-  const model = d.model || "auto";
-  const isAuto = !model || model === "auto";
-  $("#model-mode").value = isAuto ? "auto" : "fixed";
-  $("#model-id").disabled = isAuto;
-  setNum("p-temperature", d.temperature);
-  setNum("p-top_p", d.top_p);
-  setNum("p-max_tokens", d.max_tokens);
-  setNum("p-top_k", d.top_k);
-  setNum("p-presence_penalty", d.presence_penalty);
-  setNum("p-frequency_penalty", d.frequency_penalty);
-  if (!isAuto) $("#model-id").value = model;
 }
 
 function setNum(id, v) {
@@ -124,21 +116,7 @@ function getNum(id) {
   return Number.isFinite(n) ? n : null;
 }
 
-function currentDefaultsPayload() {
-  const mode = $("#model-mode").value;
-  const model = mode === "auto" ? "auto" : ($("#model-id").value || "auto");
-  return {
-    model,
-    temperature: getNum("p-temperature"),
-    top_p: getNum("p-top_p"),
-    max_tokens: getNum("p-max_tokens") != null ? Math.round(getNum("p-max_tokens")) : null,
-    top_k: getNum("p-top_k") != null ? Math.round(getNum("p-top_k")) : null,
-    presence_penalty: getNum("p-presence_penalty"),
-    frequency_penalty: getNum("p-frequency_penalty"),
-  };
-}
-
-function validateDefaultsPayload(d) {
+function validateSampling(d) {
   const checks = [
     ["temperature", d.temperature, 0, 2],
     ["top_p", d.top_p, 0, 1],
@@ -162,18 +140,173 @@ async function loadModels() {
   try {
     const data = await api("/v1/models");
     state.models = data.data || [];
-    const sel = $("#model-id");
+    const sel = $("#ps-model-id");
     const cur = sel.value;
     sel.innerHTML = state.models.map((m) =>
       `<option value="${escapeAttr(m.id)}">${escapeHtml(m.id)} · №${m.rank} · ${m.provider}</option>`
     ).join("");
     if (cur) sel.value = cur;
-    else if (state.status?.defaults?.model && state.status.defaults.model !== "auto") {
-      sel.value = state.status.defaults.model;
-    }
   } catch {
     state.models = [];
   }
+}
+
+async function loadPresets() {
+  const data = await api("/admin/presets");
+  state.presets = data.data || [];
+  renderPresetList();
+  fillChatPresetSelect();
+  if (state.isNew) return;
+  const want = state.editingSlug || "default";
+  const found = state.presets.find((p) => p.slug === want) || state.presets[0];
+  if (found) selectPreset(found.slug);
+}
+
+function renderPresetList() {
+  $("#preset-list").innerHTML = state.presets.map((p) => {
+    const active = !state.isNew && p.slug === state.editingSlug ? "active" : "";
+    const badge = p.is_system ? `<span class="pill ok">system</span>` : "";
+    return `<li>
+      <button type="button" class="preset-item ${active}" data-slug="${escapeAttr(p.slug)}">
+        <span>
+          <strong>${escapeHtml(p.title || p.slug)}</strong>
+          <small><code>${escapeHtml(p.slug)}</code> · ${escapeHtml(p.model || "auto")}</small>
+        </span>
+        ${badge}
+      </button>
+    </li>`;
+  }).join("") || `<li class="muted">Нет пресетов</li>`;
+  $$("#preset-list .preset-item").forEach((btn) => {
+    btn.addEventListener("click", () => selectPreset(btn.dataset.slug));
+  });
+}
+
+function fillChatPresetSelect() {
+  const sel = $("#chat-preset");
+  const cur = sel.value || localStorage.getItem("chat_preset") || "default";
+  sel.innerHTML = state.presets.map((p) =>
+    `<option value="${escapeAttr(p.slug)}">${escapeHtml(p.title || p.slug)} (${escapeHtml(p.slug)})</option>`
+  ).join("");
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+
+function selectPreset(slug) {
+  state.isNew = false;
+  state.editingSlug = slug;
+  const p = state.presets.find((x) => x.slug === slug);
+  if (!p) return;
+  $("#preset-form-title").textContent = p.is_system ? "Системный пресет" : "Редактирование";
+  $("#ps-slug").value = p.slug;
+  $("#ps-slug").disabled = true;
+  $("#ps-title").value = p.title || "";
+  $("#ps-description").value = p.description || "";
+  const isAuto = !p.model || p.model === "auto";
+  $("#ps-model-mode").value = isAuto ? "auto" : "fixed";
+  $("#ps-model-id").disabled = isAuto;
+  if (!isAuto) $("#ps-model-id").value = p.model;
+  setNum("ps-temperature", p.temperature);
+  setNum("ps-top_p", p.top_p);
+  setNum("ps-max_tokens", p.max_tokens);
+  setNum("ps-top_k", p.top_k);
+  setNum("ps-presence_penalty", p.presence_penalty);
+  setNum("ps-frequency_penalty", p.frequency_penalty);
+  $("#btn-preset-save").textContent = "Сохранить пресет";
+  $("#btn-preset-delete").classList.toggle("hidden", !!p.is_system);
+  renderPresetList();
+  updatePresetEndpoint(p.slug);
+}
+
+function startNewPreset() {
+  state.isNew = true;
+  state.editingSlug = null;
+  $("#preset-form-title").textContent = "Новый пресет";
+  $("#ps-slug").value = "";
+  $("#ps-slug").disabled = false;
+  $("#ps-title").value = "";
+  $("#ps-description").value = "";
+  $("#ps-model-mode").value = "auto";
+  $("#ps-model-id").disabled = true;
+  ["ps-temperature", "ps-top_p", "ps-max_tokens", "ps-top_k", "ps-presence_penalty", "ps-frequency_penalty"]
+    .forEach((id) => setNum(id, null));
+  $("#btn-preset-save").textContent = "Создать пресет";
+  $("#btn-preset-delete").classList.add("hidden");
+  $("#preset-endpoint").classList.add("hidden");
+  renderPresetList();
+}
+
+function currentPresetPayload() {
+  const mode = $("#ps-model-mode").value;
+  const model = mode === "auto" ? "auto" : ($("#ps-model-id").value || "auto");
+  return {
+    slug: $("#ps-slug").value.trim().toLowerCase(),
+    title: $("#ps-title").value.trim(),
+    description: $("#ps-description").value.trim(),
+    model,
+    temperature: getNum("ps-temperature"),
+    top_p: getNum("ps-top_p"),
+    max_tokens: getNum("ps-max_tokens") != null ? Math.round(getNum("ps-max_tokens")) : null,
+    top_k: getNum("ps-top_k") != null ? Math.round(getNum("ps-top_k")) : null,
+    presence_penalty: getNum("ps-presence_penalty"),
+    frequency_penalty: getNum("ps-frequency_penalty"),
+  };
+}
+
+function updatePresetEndpoint(slug) {
+  const base = location.origin;
+  const path = `/v1/p/${slug}/chat/completions`;
+  const url = `${base}${path}`;
+  const curl = `curl -s ${url} \\\n  -H "Content-Type: application/json" \\\n  -d '{"messages":[{"role":"user","content":"ping"}]}'`;
+  $("#preset-url").textContent = url;
+  $("#preset-curl").textContent = curl;
+  $("#preset-endpoint").classList.remove("hidden");
+}
+
+function updateApiSnippets() {
+  const base = location.origin;
+  $("#api-base").textContent = base;
+  const slug = state.editingSlug || state.presets[0]?.slug || "default";
+  $("#api-example").textContent =
+`curl -s ${base}/v1/p/${slug}/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{"messages":[{"role":"user","content":"ping"}]}'`;
+}
+
+async function savePreset() {
+  const body = currentPresetPayload();
+  const verr = validateSampling(body);
+  if (verr) {
+    toast(verr, true);
+    return;
+  }
+  if (state.isNew) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.slug)) {
+      toast("slug: латиница/цифры/_/- , начинается с буквы или цифры", true);
+      return;
+    }
+    const res = await api("/admin/presets", { method: "POST", body: JSON.stringify(body) });
+    toast("Пресет создан");
+    state.isNew = false;
+    state.editingSlug = res.preset?.slug || body.slug;
+  } else {
+    const slug = state.editingSlug;
+    const res = await api(`/admin/presets/${encodeURIComponent(slug)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    toast("Пресет сохранён");
+    state.editingSlug = res.preset?.slug || slug;
+  }
+  await loadPresets();
+  updateApiSnippets();
+}
+
+async function deletePreset() {
+  const slug = state.editingSlug;
+  if (!slug || !confirm(`Удалить пресет «${slug}»?`)) return;
+  await api(`/admin/presets/${encodeURIComponent(slug)}`, { method: "DELETE" });
+  toast("Пресет удалён");
+  state.editingSlug = "default";
+  await loadPresets();
 }
 
 async function refreshOverview() {
@@ -283,22 +416,6 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s).replace(/`/g, ""); }
 
-function updateApiSnippets() {
-  const base = `${location.origin}`;
-  $("#api-base").textContent = base;
-  const d = currentDefaultsPayload();
-  const body = {
-    messages: [{ role: "user", content: "ping" }],
-  };
-  if (d.model && d.model !== "auto") body.model = d.model;
-  if (d.temperature != null) body.temperature = d.temperature;
-  if (d.max_tokens != null) body.max_tokens = d.max_tokens;
-  $("#api-example").textContent =
-`curl -s ${base}/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -d '${JSON.stringify(body)}'`;
-}
-
 async function saveKeys(fromSetup) {
   const payload = readKeyInputs(fromSetup ? "#setup-keys" : "#keys-form");
   const body = { apply: true };
@@ -313,52 +430,23 @@ async function saveKeys(fromSetup) {
   toast("Ключи сохранены и применены");
   await loadStatus();
   await loadModels();
-  if (fromSetup) showView("gateway");
-}
-
-async function saveDefaults() {
-  const body = currentDefaultsPayload();
-  const verr = validateDefaultsPayload(body);
-  if (verr) {
-    toast(verr, true);
-    throw new Error(verr);
-  }
-  await api("/admin/defaults", { method: "PUT", body: JSON.stringify(body) });
-  toast("Настройки сохранены");
-  updateApiSnippets();
-}
-
-async function applyAll() {
-  await saveDefaults();
-  await api("/admin/apply", { method: "POST", body: "{}" });
-  toast("Конфигурация применена");
-  await loadStatus();
-  await loadModels();
-  updateApiSnippets();
+  if (fromSetup) showView("presets");
 }
 
 async function sendChat(e) {
   e.preventDefault();
   const text = $("#chat-input").value.trim();
   if (!text) return;
+  const slug = $("#chat-preset").value || "default";
+  localStorage.setItem("chat_preset", slug);
   const log = $("#chat-log");
   const meta = $("#chat-meta");
   log.classList.remove("hidden");
   log.insertAdjacentHTML("beforeend", `<div class="msg user">${escapeHtml(text)}</div>`);
   $("#chat-input").value = "";
-  const d = currentDefaultsPayload();
-  const verr = validateDefaultsPayload(d);
-  if (verr) {
-    toast(verr, true);
-    return;
-  }
   const body = { messages: [{ role: "user", content: text }] };
-  if (d.model && d.model !== "auto") body.model = d.model;
-  ["temperature", "top_p", "max_tokens", "top_k", "presence_penalty", "frequency_penalty"].forEach((k) => {
-    if (d[k] != null) body[k] = d[k];
-  });
   try {
-    const res = await fetch("/v1/chat/completions", {
+    const res = await fetch(`/v1/p/${encodeURIComponent(slug)}/chat/completions`, {
       method: "POST",
       headers: apiKeyHeaders(),
       body: JSON.stringify(body),
@@ -370,9 +458,10 @@ async function sendChat(e) {
     const model = res.headers.get("X-LLM-Proxy-Model") || "?";
     const provider = res.headers.get("X-LLM-Proxy-Provider") || "?";
     const attempts = res.headers.get("X-LLM-Proxy-Attempts") || "?";
+    const preset = res.headers.get("X-LLM-Proxy-Preset") || slug;
     meta.classList.remove("hidden");
     meta.textContent =
-      `статус ${res.status} · модель ${model} · провайдер ${provider} · попыток ${attempts}`;
+      `статус ${res.status} · пресет ${preset} · модель ${model} · провайдер ${provider} · попыток ${attempts}`;
     log.scrollTop = log.scrollHeight;
   } catch (err) {
     toast(err.message, true);
@@ -389,17 +478,23 @@ function initDates() {
 
 function bind() {
   $$("#nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
-  $("#btn-apply").addEventListener("click", () => applyAll().catch((e) => toast(e.message, true)));
   $("#btn-setup-save").addEventListener("click", () => saveKeys(true).catch((e) => toast(e.message, true)));
   $("#btn-keys-save").addEventListener("click", () => saveKeys(false).catch((e) => toast(e.message, true)));
   $("#btn-refresh-overview").addEventListener("click", () => refreshOverview());
   $("#chat-form").addEventListener("submit", sendChat);
-  $("#model-mode").addEventListener("change", () => {
-    $("#model-id").disabled = $("#model-mode").value === "auto";
-    updateApiSnippets();
+  $("#btn-preset-new").addEventListener("click", startNewPreset);
+  $("#btn-preset-save").addEventListener("click", () => savePreset().catch((e) => toast(e.message, true)));
+  $("#btn-preset-delete").addEventListener("click", () => deletePreset().catch((e) => toast(e.message, true)));
+  $("#btn-preset-copy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("#preset-curl").textContent);
+      toast("curl скопирован");
+    } catch {
+      toast("Не удалось скопировать", true);
+    }
   });
-  ["model-id", "p-temperature", "p-top_p", "p-max_tokens", "p-top_k"].forEach((id) => {
-    $(`#${id}`).addEventListener("input", updateApiSnippets);
+  $("#ps-model-mode").addEventListener("change", () => {
+    $("#ps-model-id").disabled = $("#ps-model-mode").value === "auto";
   });
   $("#ui-proxy-key").value = localStorage.getItem("proxy_api_key") || "";
   $("#ui-proxy-key").addEventListener("change", (e) => {
@@ -415,9 +510,9 @@ async function boot() {
   try {
     await loadStatus();
     await loadModels();
-    fillDefaults(state.status.defaults || {});
+    await loadPresets();
     updateApiSnippets();
-    if (state.status.setup_complete) showView("gateway");
+    if (state.status.setup_complete) showView("presets");
   } catch (e) {
     toast(`Не удалось связаться с proxy: ${e.message}`, true);
     showView("setup");
