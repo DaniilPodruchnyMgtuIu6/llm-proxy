@@ -2,7 +2,7 @@
 
 - **ID:** `2026-10-05T002400-presets`
 - **Created:** 2026-10-05T00:24:00+03:00
-- **Status:** planned
+- **Status:** in progress (implementation done, smoke pending)
 - **Branch:** `feat/presets` (from `main`)
 - **Supersedes archive:** `archive/2026-10-05-gateway-ui`
 

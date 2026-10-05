@@ -14,14 +14,17 @@
 | `GET` | `/docs` | Swagger UI |
 | `GET` | `/openapi.yaml` | OpenAPI 3 |
 | `GET` | `/healthz` | liveness |
-| `GET` | `/admin/status` | setup / masked keys / defaults |
+| `GET` | `/admin/status` | setup / masked keys |
 | `PUT` | `/admin/keys` | сохранить ключи в runtime volume (+ `apply`) |
-| `PUT` | `/admin/defaults` | model/sampling defaults для gateway |
+| `PUT` | `/admin/defaults` | legacy: синхронизирует системный пресет `default` |
+| `GET`/`POST` | `/admin/presets` | список / создать пресет |
+| `GET`/`PUT`/`DELETE` | `/admin/presets/{slug}` | CRUD пресета (+ готовый URL/curl) |
 | `POST` | `/admin/apply` | hot-reload провайдеров |
 | `GET` | `/v1/providers` | источники + их квоты/здоровье |
 | `GET` | `/v1/models` | модели с `source` + `quota` + `quality_score`/`rank` (лучшие первые) |
 | `GET` | `/v1/stats/summary` | агрегаты из PostgreSQL |
-| `POST` | `/v1/chat/completions` | OpenAI-чат; `model` опционален (`auto` / omit) + fallback |
+| `POST` | `/v1/p/{slug}/chat/completions` | **главный путь**: chat с merge пресета |
+| `POST` | `/v1/chat/completions` | chat + merge системного пресета `default` |
 | `POST` | `/v1/completions` | алиас chat |
 | `POST` | `/v1/completion` | алиас chat |
 | `POST` | `/v1/route` | авто-выбор модели (фильтры `provider` / `recommended_only`) |
@@ -135,7 +138,37 @@ curl "http://localhost:8080/v1/models?provider=groq&free=true"
 | Gemini | оценка Free Tier | **local_db** (estimate ceiling) |
 
 БД: PostgreSQL (`DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` / `DB_SSLMODE`, см. `docker-compose.yml` + pgAdmin `:5050`).  
-Таблицы: `usage_events`, `daily_counters`, `provider_health`, `rate_limits`, `schema_migrations`.
+Таблицы: `usage_events` (поле `preset`), `daily_counters`, `provider_health`, `rate_limits`, `presets`, `schema_migrations`.
+
+## Пресеты
+
+Именованный конфиг `model` + sampling в PostgreSQL. Основная система вызывает готовый URL и почти всегда шлёт только `messages`.
+
+### Главный путь
+
+```bash
+# 1) создать пресет (или через UI → Пресеты)
+curl -s http://localhost:8080/admin/presets -H "Content-Type: application/json" -d '{
+  "slug":"work","title":"Work","model":"auto","temperature":0.2,"max_tokens":256
+}'
+
+# 2) вызов — достаточно messages; явное поле в теле перекрывает пресет
+curl -s http://localhost:8080/v1/p/work/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"ping"}]}'
+```
+
+Merge: если в теле нет поля / `null` / пустой `model` → берётся из пресета; иначе побеждает тело.  
+`POST /v1/chat/completions` автоматически подмешивает системный пресет `default` (нельзя удалить).  
+В `usage_events.preset` пишется slug; ответный заголовок `X-LLM-Proxy-Preset`.
+
+| Метод | Путь | Заметки |
+|-------|------|---------|
+| `GET` | `/admin/presets` | список |
+| `POST` | `/admin/presets` | создать (`slug` ^[a-z0-9][a-z0-9_-]{0,63}$) |
+| `GET` | `/admin/presets/{slug}` | пресет + `url` + `curl_example` |
+| `PUT` | `/admin/presets/{slug}` | обновить |
+| `DELETE` | `/admin/presets/{slug}` | запрещено для `is_system` |
 
 ## GET `/v1/stats/summary`
 
@@ -161,9 +194,19 @@ curl -s http://localhost:8080/v1/route -H "Content-Type: application/json" -d "{
 4. Для `scope=shared_pool` не суммировать RPD по моделям — один `pool_id` = один бюджет.
 5. При `429` — следующий кандидат (прокси сделает это сам).
 
+## POST `/v1/p/{slug}/chat/completions` (рекомендуется)
+
+То же OpenAI-тело, что у chat, но недостающие `model`/sampling берутся из пресета `{slug}`.
+
+```bash
+curl -s http://localhost:8080/v1/p/default/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"ping"}]}'
+```
+
 ## POST `/v1/chat/completions`
 
-OpenAI-тело. **`model` можно не указывать** (или `"auto"`) — прокси подставит лучшую модель и пойдёт по fallback.  
+Эквивалентно `/v1/p/default/chat/completions`: подмешивает системный пресет `default`.  
 Алиасы: `/v1/completions`, `/v1/completion`.
 
 ```bash
@@ -199,7 +242,7 @@ curl -s http://localhost:8080/v1/completion -H "Content-Type: application/json" 
 | n ≠ 1 | да | нет (отбрасываем) | да |
 
 При 429/502/503/504 — fallback на следующий кандидат по `rank`.  
-Заголовки ответа: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`, `X-Request-ID`.
+Заголовки ответа: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`, `X-LLM-Proxy-Preset`, `X-Request-ID`.
 
 ### Request ID и логи
 

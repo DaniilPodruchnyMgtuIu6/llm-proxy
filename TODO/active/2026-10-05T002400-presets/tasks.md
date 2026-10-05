@@ -3,14 +3,14 @@
 - [x] Архив gateway-ui + tag + ROLLBACK.md
 - [x] Ветка `feat/presets` от `main`
 - [x] Утвердить дизайн / записать plan.md
-- [ ] Migration `presets` + seed `default`
-- [ ] Store CRUD presets
-- [ ] Merge preset → chat body
-- [ ] `POST /v1/p/{slug}/chat/completions`
-- [ ] Plain `/v1/chat/completions` merge `default`
-- [ ] Admin API presets CRUD
-- [ ] UI: вкладка Пресеты (list/create/edit/copy URL)
-- [ ] UI: убрать globals defaults; Настройки упростить
-- [ ] UI: Чат с выбором пресета
-- [ ] Docs + OpenAPI + architecture
+- [x] Migration `presets` + seed `default`
+- [x] Store CRUD presets
+- [x] Merge preset → chat body
+- [x] `POST /v1/p/{slug}/chat/completions`
+- [x] Plain `/v1/chat/completions` merge `default`
+- [x] Admin API presets CRUD
+- [x] UI: вкладка Пресеты (list/create/edit/copy URL)
+- [x] UI: убрать globals defaults; Настройки упростить
+- [x] UI: Чат с выбором пресета
+- [x] Docs + OpenAPI + architecture
 - [ ] Smoke

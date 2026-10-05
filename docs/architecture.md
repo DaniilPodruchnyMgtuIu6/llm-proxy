@@ -13,19 +13,19 @@
 Прокси агрегирует бесплатные LLM-источники (Gemini, Groq, OpenRouter) за единым OpenAI-совместимым API. Основная система:
 
 1. смотрит `/v1/providers` и `/v1/models` (уже отсортированы по «мозгам»);
-2. либо шлёт `POST /v1/route` / `model:"auto"` — прокси сам выбирает кандидата;
-3. либо явный `model` в `/v1/chat/completions` (при 429/5xx — fallback);
+2. создаёт **пресет** (model + sampling) и вызывает `POST /v1/p/{slug}/chat/completions` почти только с `messages`;
+3. либо шлёт `POST /v1/route` / plain chat (подмешивается системный пресет `default`);
 4. при необходимости смотрит `/v1/stats/summary`.
 
 ```mermaid
 flowchart LR
   UI[Gateway UI :3000] --> API[LLM Proxy :8080]
-  Main[Main system] --> API
+  Main[Main system] -->|preset URL| API
   API --> RT[(runtime volume)]
   API --> G[Gemini]
   API --> Q[Groq]
   API --> O[OpenRouter]
-  API --> PG[(PostgreSQL)]
+  API --> PG[(PostgreSQL presets + usage)]
   Admin[pgAdmin :5050] --> PG
 ```
 
@@ -33,17 +33,17 @@ flowchart LR
 
 | Компонент | Путь / сервис | Роль |
 |-----------|---------------|------|
-| Gateway UI | `web/` · compose `web` | setup ключей, квоты, stats, test chat, Apply |
-| HTTP API | `internal/api` | ручки, Swagger, admin, запись usage |
-| Runtime | `internal/runtime` | keys/defaults в volume, hot-reload без `compose up` |
-| Registry | `internal/provider` | агрегация, auto-route, fallback 429/5xx |
+| Gateway UI | `web/` · compose `web` | setup ключей, **пресеты**, квоты, stats, test chat |
+| HTTP API | `internal/api` | ручки, Swagger, admin presets, запись usage |
+| Runtime | `internal/runtime` | keys в volume, hot-reload без `compose up` |
+| Registry | `internal/provider` | агрегация, auto-route, fallback 429/5xx, merge preset |
 | Providers | `internal/provider/{gemini,groq,openrouter}` | upstream OpenAI-compat клиенты |
 | Quota catalog | `internal/quota` | статические лимиты Free Tier |
 | Ranking | `internal/ranking` | `quality_score` (выше = умнее; free-tier предпочитает надёжный Flash) |
 | Chat filter | `internal/provider/capability.go` | в каталог/роутинг только chat-capable модели |
 | Soft-deny | registry `denyUntil` | временно исключает id после 404 / model-unusable |
 | Circuit | `provider_health` | только 5xx/timeout; 429/400/404 провайдера не глушат |
-| Store | `internal/store` | PostgreSQL: events, counters, health, rate_limits, migrations |
+| Store | `internal/store` | PostgreSQL: presets, events, counters, health, rate_limits, migrations |
 | Postgres | `docker-compose` service `postgres` | persistence |
 | pgAdmin | `docker-compose` service `pgadmin` | UI БД |
 
@@ -225,6 +225,30 @@ flowchart TB
 ```
 
 `GET /v1/stats/summary` агрегирует counters за `[from, to]` (по умолчанию 7 дней UTC).
+
+## 7.1 Пресеты
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant A as API
+  participant S as Postgres
+  participant R as Registry
+
+  C->>A: POST /v1/p/work/chat/completions (messages)
+  A->>S: GetPreset(work)
+  A->>A: MergePresetIntoBody (body wins if set)
+  A->>A: ValidateChatBody
+  A->>R: ChatCompletions
+  R-->>A: response + attempted
+  A->>S: RecordUsage(preset=work)
+  A-->>C: JSON + X-LLM-Proxy-Preset
+```
+
+- Таблица `presets`; системный `default` создаётся миграцией / `EnsureDefaultPreset`.
+- Plain `/v1/chat/completions` = merge `default`.
+- Override: явное поле в теле побеждает пресет.
+- UI: вкладка «Пресеты» — CRUD + копирование URL/curl; чат ходит на `/v1/p/{slug}/...`.
 
 ## 8. Рекомендуемый роутинг основной системы
 

@@ -1,15 +1,15 @@
 openapi: 3.0.3
 info:
   title: LLM Proxy API
-  version: 0.6.0
+  version: 0.7.0
   description: |
     HTTP-прокси над бесплатными LLM-источниками (Gemini, Groq, OpenRouter).
 
     ## Для основной системы
     1. `GET /v1/providers` — здоровье источников и квоты пулов  
     2. `GET /v1/models` — модели уже отсортированы: `rank=1` самая сильная  
-    3. `POST /v1/route` или `POST /v1/chat/completions` с `model:"auto"` — прокси сам выберет модель  
-    4. Либо явный `model` — при 429/5xx прокси сделает fallback (лимит попыток / timeout)  
+    3. Создать пресет → `POST /v1/p/{slug}/chat/completions` почти только с `messages`  
+    4. Либо `POST /v1/chat/completions` (подмешивает системный пресет `default`) / `POST /v1/route`  
     5. `GET /v1/stats/summary` — статистика из PostgreSQL  
 
     ## Auth (опционально)
@@ -36,6 +36,7 @@ servers:
     description: Local
 tags:
   - name: system
+  - name: presets
   - name: catalog
   - name: inference
   - name: stats
@@ -154,18 +155,115 @@ paths:
   /admin/defaults:
     put:
       tags: [system]
-      summary: Save default model/sampling for gateway UI
+      summary: Legacy sync of system preset `default`
+      description: |
+        Сохраняет sampling в runtime и синхронизирует системный пресет `default`.
+        Предпочтительный путь — `PUT /admin/presets/default`.
       operationId: adminDefaults
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/PresetWrite"
       responses:
         "200":
           description: Saved defaults
+
+  /admin/presets:
+    get:
+      tags: [presets]
+      summary: List presets
+      operationId: listPresets
+      responses:
+        "200":
+          description: Preset list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, example: list }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Preset"
+    post:
+      tags: [presets]
+      summary: Create preset
+      operationId: createPreset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresetWrite"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "400":
+          $ref: "#/components/responses/ProxyError"
+        "409":
+          $ref: "#/components/responses/ProxyError"
+
+  /admin/presets/{slug}:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9_-]{0,63}$'
+    get:
+      tags: [presets]
+      summary: Get preset + ready URL/curl
+      operationId: getPreset
+      responses:
+        "200":
+          description: Preset with endpoint helpers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "404":
+          $ref: "#/components/responses/ProxyError"
+    put:
+      tags: [presets]
+      summary: Update preset
+      operationId: updatePreset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresetWrite"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "400":
+          $ref: "#/components/responses/ProxyError"
+        "404":
+          $ref: "#/components/responses/ProxyError"
+    delete:
+      tags: [presets]
+      summary: Delete preset
+      description: System presets (`is_system=true`, e.g. `default`) cannot be deleted.
+      operationId: deletePreset
+      responses:
+        "200":
+          description: Deleted
+        "403":
+          $ref: "#/components/responses/ProxyError"
+        "404":
+          $ref: "#/components/responses/ProxyError"
 
   /admin/apply:
     post:
@@ -231,15 +329,16 @@ paths:
   /v1/chat/completions:
     post:
       tags: [inference]
-      summary: Chat completions (OpenAI-compatible)
+      summary: Chat completions (merges system preset `default`)
       description: |
-        Проксирует запрос в backend по `model`.
+        Подмешивает системный пресет `default`, затем проксирует в backend.
+        Предпочтительный путь: `POST /v1/p/{slug}/chat/completions`.
         `model` можно не указывать или поставить `"auto"` — прокси выберет лучшую доступную модель
         (rank + remaining) и при 429/5xx пойдёт по fallback.
         Основные sampling-параметры (`temperature`, `top_p`, `max_tokens`, …) принимаются;
         перед upstream тело санитизируется под возможности провайдера (неподдерживаемые поля отбрасываются).
         Алиасы: `POST /v1/completions`, `POST /v1/completion`.
-        Ответные заголовки: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`.
+        Ответные заголовки: `X-LLM-Proxy-Model`, `X-LLM-Proxy-Provider`, `X-LLM-Proxy-Attempts`, `X-LLM-Proxy-Preset`.
       operationId: chatCompletions
       parameters:
         - $ref: "#/components/parameters/RequestID"
@@ -300,6 +399,8 @@ paths:
               schema: { type: string }
             X-LLM-Proxy-Attempts:
               schema: { type: integer }
+            X-LLM-Proxy-Preset:
+              schema: { type: string }
           content:
             application/json:
               schema:
@@ -317,6 +418,53 @@ paths:
         "502":
           $ref: "#/components/responses/ProxyError"
         "503":
+          $ref: "#/components/responses/ProxyError"
+
+  /v1/p/{slug}/chat/completions:
+    post:
+      tags: [inference, presets]
+      summary: Chat via named preset (recommended)
+      description: |
+        Merge пресета `{slug}` в тело: отсутствующие `model`/sampling берутся из БД;
+        явные поля клиента побеждают. Далее — та же валидация и роутинг, что у chat.
+      operationId: presetChatCompletions
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z0-9][a-z0-9_-]{0,63}$'
+        - $ref: "#/components/parameters/RequestID"
+        - $ref: "#/components/parameters/ProxyAPIKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+            examples:
+              messages_only:
+                summary: Только messages
+                value:
+                  messages:
+                    - role: user
+                      content: ping
+      responses:
+        "200":
+          description: Upstream chat completion
+          headers:
+            X-LLM-Proxy-Preset:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+        "400":
+          $ref: "#/components/responses/ProxyError"
+        "404":
+          $ref: "#/components/responses/ProxyError"
+        "502":
           $ref: "#/components/responses/ProxyError"
 
   /v1/completions:
@@ -629,6 +777,46 @@ components:
           enum: [system, user, assistant, tool]
         content:
           type: string
+
+    Preset:
+      type: object
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        description: { type: string }
+        model: { type: string }
+        temperature: { type: number, nullable: true }
+        top_p: { type: number, nullable: true }
+        top_k: { type: integer, nullable: true }
+        max_tokens: { type: integer, nullable: true }
+        presence_penalty: { type: number, nullable: true }
+        frequency_penalty: { type: number, nullable: true }
+        is_system: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PresetWrite:
+      type: object
+      properties:
+        slug: { type: string, description: Required on create }
+        title: { type: string }
+        description: { type: string }
+        model: { type: string, default: auto }
+        temperature: { type: number, nullable: true, minimum: 0, maximum: 2 }
+        top_p: { type: number, nullable: true, minimum: 0, maximum: 1 }
+        top_k: { type: integer, nullable: true, minimum: 1, maximum: 200 }
+        max_tokens: { type: integer, nullable: true, minimum: 8, maximum: 128000 }
+        presence_penalty: { type: number, nullable: true, minimum: -2, maximum: 2 }
+        frequency_penalty: { type: number, nullable: true, minimum: -2, maximum: 2 }
+
+    PresetResponse:
+      type: object
+      properties:
+        preset:
+          $ref: "#/components/schemas/Preset"
+        endpoint: { type: string, example: /v1/p/work/chat/completions }
+        url: { type: string }
+        curl_example: { type: string }
 
     ChatCompletionRequest:
       type: object

@@ -57,14 +57,16 @@ chmod +x scripts/*.sh
 | `GET` | `/v1/providers` | Источники + квоты |
 | `GET` | `/v1/models` | Модели: `source`, `quota`, `quality_score`, `rank` |
 | `GET` | `/v1/stats/summary` | Статистика из PostgreSQL |
-| `POST` | `/v1/chat/completions` | Чат (`model` опционален) |
+| `POST` | `/v1/p/{slug}/chat/completions` | **Пресет URL** (рекомендуется) |
+| `POST` | `/v1/chat/completions` | Чат + merge пресета `default` |
 | `POST` | `/v1/completion` | Алиас chat |
 | `POST` | `/v1/route` | Авто-выбор модели |
+| `GET`/`POST` | `/admin/presets` | Список / создание пресетов |
 
 ```bash
 curl "http://localhost:8080/v1/models?recommended=true"
-curl -s http://localhost:8080/v1/completion -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"ping"}],"max_tokens":32}'
+curl -s http://localhost:8080/v1/p/default/chat/completions -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"ping"}]}'
 ```
 
 ## Провайдеры

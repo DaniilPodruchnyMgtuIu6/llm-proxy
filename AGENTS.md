@@ -116,7 +116,7 @@ flowchart TD
 |-------|------|
 | GET | `/docs`, `/openapi.yaml`, `/healthz` |
 | GET | `/v1/providers`, `/v1/models`, `/v1/stats/summary` |
-| POST | `/v1/chat/completions` |
+| POST | `/v1/p/{slug}/chat/completions` (пресет), `/v1/chat/completions` |
 
 `/v1/models`: `rank=1` — лучшая; есть `quality_score`, `quota`.
 
